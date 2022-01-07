@@ -1,0 +1,11 @@
+--- content/browser/browser.xul.orig	2007-12-12 14:29:39.697992237 +0100
++++ content/browser/browser.xul	2007-12-12 14:30:26.593991572 +0100
+@@ -212,6 +212,8 @@
+   </broadcasterset>
+ 
+   <keyset id="mainKeyset">
++    <key id="goBackKb" keycode="VK_F19" command="Browser:Back" />
++    <key id="goForwardKb" keycode="VK_F20" command="Browser:Forward" />
+     <key id="key_newNavigator"
+          key="&newNavigatorCmd.key;"
+          command="cmd_newNavigator"

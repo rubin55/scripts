@@ -1,0 +1,25 @@
+; .hsync.ini
+;
+; format: key=local-path,share-path
+; keys are matched between sections. only if both sections
+; have the same key, they become synchronization candidates.
+
+
+[atlas]
+documents=/home/rubin/Documents,rubin/Documents
+pictures=/home/rubin/Pictures,rubin/Pictures
+source=/home/rubin/Source,rubin/Source
+fonts=/data/raaf-repo/private/fonts,raaf-repo/private/fonts
+software=/data/raaf-repo/private/software,raaf-repo/private/software
+
+[tezro]
+documents=C:/Users/rubin/Documents,C$/Users/rubin/Documents
+pictures=C:/Users/rubin/Pictures,C$/Users/rubin/Pictures
+source=C:/Users/rubin/Source,C$/Users/rubin/Source
+
+[zildjian]
+documents=D:/Documents,D$/Documents
+pictures=D:/Pictures,D$/Pictures
+source=D:/Source,D$/Source
+fonts=D:/Fonts,D$/Fonts
+software=D:/Software,D$/Software
