@@ -1,5 +1,8 @@
 #!/bin/sh
 
+echo "Don't run this."
+exit 1
+
 BASE="/net/Archive/Music/Library"
 IFS=$'\x09'$'\x0A'$'\x0D'
 
