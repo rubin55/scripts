@@ -6,7 +6,19 @@
 #
 #      Set-ExecutionPolicy RemoteSigned
 #
-# 1. Make sure you disable wsl's broken resolv.conf handler.
+# 1. Make sure the InterfaceMetric on your VPN/Tun/Tap network devices are lower
+#    than the InterfaceMetric on your main Ethernet/WiFi interface, thus making
+#    them higher priority. First list your interfaces:
+#
+#      Get-NetIPInterface -AddressFamily IPv4 | Where-Object ConnectionState -EQ 'Connected' | Where-Object NlMtu -LT 9001
+#
+#    The first number in the table is the interace's index number. Note the one
+#    for your VPN/Tun/Tap adapter and set the metric to something lower (meaning
+#    higher priority) than your main ethernet/wi-fi interface, for example:
+#
+#      Set-NetIPInterface -InterfaceIndex 34 -InterfaceMetric 15
+#
+# 2. Make sure you disable wsl's broken resolv.conf handler.
 #    Create /etc/wsl.conf with the following 2 lines (without the pound signs):
 #
 #      [network]
@@ -14,12 +26,12 @@
 #
 #    After that, make sure you issue a wsl.exe --shutdown.
 #
-# 2. Configure your WSL distro name in $WslDistroName below (do wsl -l to
+# 3. Configure your WSL distro name in $WslDistroName below (do wsl -l to
 #    see your distro names) and make sure we're pointing at your resolv.conf
 #    file in $ResolvConfFile. Also make sure we can write to the resolv.conf
 #    file. I had to set permissions pretty broadly at 666 (chmod 666 /etc/resolv.conf).
 #
-# 3. Schedule this script with Task Scheduler:
+# 4. Schedule this script with Task Scheduler:
 #
 #      * Click Action –> Create Task…
 #      * Give your task a name in the General tab
@@ -99,10 +111,10 @@ $Entries = $NetworkInterfaces | ForEach-Object {
     'InterfaceAlias'      = $_.InterfaceAlias
     'InterfaceIndex'      = $_.InterfaceIndex
     'InterfaceMetric'     = $_.InterfaceMetric
-    'DNSServerAddresses'  = ($DNSServerAddresses | Where-Object InterfaceIndex -EQ $_.InterfaceIndex | Where-Object AddressFamily -EQ 2).ServerAddresses
-    'DNSSuffixes'  =  @(($DNSClients | Where-Object InterfaceIndex -EQ $_.InterfaceIndex).ConnectionSpecificSuffix) + @(($DNSClients).ConnectionSpecificSuffixSearchList | Out-Null)
+    'DNSServerAddresses'  = ($DNSServerAddresses | Where-Object InterfaceIndex -EQ $_.InterfaceIndex | Where-Object AddressFamily -EQ 2).ServerAddresses | Where-Object { $_ -and $_.Trim() }
+    'DNSSuffixes'  =  @(($DNSClients | Where-Object InterfaceIndex -EQ $_.InterfaceIndex).ConnectionSpecificSuffix) + @(($DNSClients).ConnectionSpecificSuffixSearchList | Out-Null) | Where-Object { $_ -and $_.Trim() }
   }
-} | Sort-Object InterfaceMetric -Unique
+} | Sort-Object InterfaceMetric,InterfaceIndex -Unique
 
 # Tell the console what we found.
 Write-Output ([string]::Format("      Resolv.conf location: {0}", $ResolvConfFile))
