@@ -50,6 +50,8 @@ if [ $(which balooctl 2> /dev/null) ]; then
 fi
 
 # Run various background processes.
+runOnce set-xrandr-scaling-mode.sh
+runOnce fix-thinkpad-trackpoint-mouse-speed.sh
 runOnce pipewire
 runOnce pipewire-pulse
 runOnce tpmmld -d
