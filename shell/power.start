@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Set the display to halfbright.
+echo 24 > /sys/class/backlight/amdgpu_bl0/brightness
+
 # Set a few generic power-saving options.
 if [ -e '/proc/sys/vm/dirty_writeback_centisecs' ]; then
     echo '1500' > '/proc/sys/vm/dirty_writeback_centisecs'
@@ -30,21 +33,15 @@ for dev in $netdevs; do
 done
 
 # Enable power management for scsi/ahci host controllers.
-hbadevs=$(ls -d /sys/class/scsi_host/host*)
+hbadevs=$(ls -d /sys/class/scsi_host/host* 2>/dev/null)
 for dev in $hbadevs; do
     echo 'min_power' > $dev/link_power_management_policy
 done
 
 # Enable power management for PCI devices.
-# But exclude USB hubs (known issues on AMD based systems).
-usbdevs=$(lspci | grep -i usb | cut -d ' ' -f 1)
 pcidevs=$(ls -d /sys/bus/pci/devices/*)
 for dev in $pcidevs; do
-    if [[ "$usbdevs" =~ $(echo $dev | sed 's|/sys/bus/pci/devices/0000:||g') ]]; then
-        echo "Skipping power management setting for PCI USB Controller device $(echo $dev | sed 's|/sys/bus/pci/devices/0000:||g')"
-    else
-        echo auto > $dev/power/control
-    fi	
+    echo auto > $dev/power/control
 done
 
 # Enable power management for USB devices.
@@ -62,7 +59,7 @@ for dev in $usbdevs; do
     if [ ! "$skip" -a -e $dev/power/control ]; then
         echo auto > $dev/power/control;
     elif [ "$product" != "empty" ]; then
-        echo "Skipping power management setting for USB device $product"
+        echo "Skipping power management setting for $product"
     fi
 
     unset skip
