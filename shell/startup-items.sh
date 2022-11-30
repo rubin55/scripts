@@ -56,4 +56,5 @@ runOnce pipewire
 runOnce pipewire-pulse
 runOnce tpmmld -d
 runOnce syncthing --no-browser
+runOnce sunshine
 
