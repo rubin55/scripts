@@ -10,11 +10,13 @@ fi
 
 case "$platform" in
     darwin)
-        RABBITMQ_MNESIA_BASE="$HOME/Library/Application Support/RabbitMQ/mnesia"
+        RABBITMQ_GENERATED_CONFIG_DIR="$HOME/Library/Application Support/RabbitMQ/genconf"
+        RABBITMQ_MNESIA_DIR="$HOME/Library/Application Support/RabbitMQ/mnesia"
         RABBITMQ_LOG_BASE="$HOME/Library/Application Support/RabbitMQ/logs"
     ;;
     bsd|gnu/linux|linux|unix|windows)
-        RABBITMQ_MNESIA_BASE="$HOME/.rabbitmq/mnesia"
+        RABBITMQ_GENERATED_CONFIG_DIR="$HOME/.rabbitmq/genconf"
+        RABBITMQ_MNESIA_DIR="$HOME/.rabbitmq/mnesia"
         RABBITMQ_LOG_BASE="$HOME/.rabbitmq/logs"
     ;;
     *)
@@ -22,7 +24,7 @@ case "$platform" in
     exit 1
 esac
 
-export RABBITMQ_MNESIA_BASE RABBITMQ_LOG_BASE
+export RABBITMQ_GENERATED_CONFIG_DIR RABBITMQ_MNESIA_DIR RABBITMQ_LOG_BASE
 
 # Prints the standard help message for this utility.
 function printUsageText {
