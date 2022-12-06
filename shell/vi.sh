@@ -12,11 +12,10 @@ case "$platform" in
     vi=/Applications/MacVim.app/Contents/bin/gvim
     ;;
     bsd|gnu/linux|linux|unix)
-    vi=/usr/bin/gvim
+    vi=gvim
     ;;
     windows)
-    #vi=gvim.exe
-    vi=/usr/bin/gvim
+    vi=gvim.exe
     ;;
     *)
     echo "Unknown platform \"$platform\"."
@@ -29,17 +28,14 @@ vserver=$($vi --version | grep -w '+clientserver')
 
 if [ ! -z "$vserver" -a -z "$running" ]; then
     # Starting new vim server to open $@..
-    echo Starting new vim server..
     $vi --servername VIM -f "$@"
 elif [ ! -z "$vserver" -a ! -z "$running" ]; then
     if [ -z "$@" ]; then
         # Focusing already-running vim..
-        echo Focusing running vim..
         xdotool windowactivate `xdotool search --name VIM | tail -n 1`
     else
         # Opening $@ on running vim server..
-        echo Re-using running vim..
-        $vi --servername VIM --remote -f "$@"
+        $vi --servername VIM --remote-wait "$@"
     fi
 else
     # Vim client/server mode not supported, opening $@ directly..
