@@ -18,7 +18,7 @@ else
     if [ "$@" ]; then
         emacsclient -n "$@"
     else
-        emacsclient -n
+        xdotool windowactivate `xdotool search --name emacs | tail -n 1`
     fi
 fi
 
