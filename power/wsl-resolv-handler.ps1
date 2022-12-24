@@ -58,7 +58,7 @@
 #          Arguments: -WindowStyle Hidden -NoProfile -File "c:\where\you\stored\wsl-resolv-handler.ps1"
 #
 
-$WslDistroName = "Debian"
+$WslDistroName = "Void"
 $ResolvConfFile = [string]::Format("\\wsl$\{0}\etc\resolv.conf", $WslDistroName)
 
 if(!(Test-Path -Path $ResolvConfFile)) {
