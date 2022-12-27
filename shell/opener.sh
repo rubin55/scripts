@@ -22,8 +22,8 @@ if [ "$platform" == "darwin" ]; then
 fi
 
 if [ "$platform" == "windows" ]; then
-    source /D/Source/Projects/Administration/Scripts/Shell/winpath.sh
-    handler="explorer"
+    source ~/Syncthing/Source/Rubin/scripts/shell/winpath.sh
+    handler="explorer.exe"
     input="$(winpath "$1" | sed 's|/|\\|g')"
 fi
 
