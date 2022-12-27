@@ -194,10 +194,10 @@ for gpg_file in gpg_files:
                     print(f'{k}\t{u}')
                 elif match_key in k and not match_user:
                     output_helper(k, u, p)
-                    break
+                    exit(0)
                 elif match_key in k and match_user in u:
                     output_helper(k, u, p)
-                    break
+                    exit(0)
 
             except ValueError:
                 pass
