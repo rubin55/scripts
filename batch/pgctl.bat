@@ -8,17 +8,17 @@ if errorlevel 1 call :def
 exit/b
 
 :start
-  echo Starting Postgres Database Service
+  echo Starting PostgresSQL Database Service
   sc start %svc%
   goto :end
 
 :stop
-  echo Stopping Postgres Database Service
+  echo Stopping PostgresSQL Database Service
   sc stop %svc%
   goto :end
 
 :status
-  echo Showing status for Postgres Database Service
+  echo Showing status for PostgresSQL Database Service
   sc query %svc%
   goto :end
 
