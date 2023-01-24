@@ -4,7 +4,7 @@
 function runOnce() {
     local program=$1
 
-    if [ $(which "$program") > /dev/null 2>&1 ]; then
+    if [ $(which "$program" 2> /dev/null) ]; then
         running="$(ps ax | grep "$program" | grep -v grep)"
         if [ -z "$running" ]; then
             echo "Starting $@..." >> "$log" 2>&1
