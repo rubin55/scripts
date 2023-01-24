@@ -14,23 +14,38 @@ fi
 # Set gvim variable based on platform.
 case "$platform" in
     darwin)
+    vim='/Applications/MacVim.app/Contents/bin/vim'
     gvim='/Applications/MacVim.app/Contents/bin/gvim'
     ;;
     bsd|gnu/linux|linux|unix)
-    gvim='/usr/bin/gvim'
+    vim='vim'
+    gvim='gvim'
     ;;
     windows)
-    gvim='/mnt/c/Program Files/Vim/vim82/gvim.exe'
+    vim='vim.exe'
+    gvim='gvim.exe'
     ;;
     *)
     echo "Unknown platform \"$platform\"."
 esac
 
-# Contains a pid when gvim is running.
-running="$(pgrep -f "$gvim")"
+# Check if gvim is running.
+case "$platform" in
+    darwin)
+    running="$(pgrep -f "$gvim")"
+    ;;
+    bsd|gnu/linux|linux|unix)
+    running="$(pgrep -f "$gvim")"
+    ;;
+    windows)
+    running="$(tasklist.exe | grep gvim.exe | awk '{print $2}')"
+    ;;
+    *)
+    echo "Unknown platform \"$platform\"."
+esac
 
 # Contains a non-empty string when gvim supports client/server mode.
-vserver="$("$gvim" --version | grep -w '+clientserver')"
+vserver="$("$vim" --version | grep -w '+clientserver')"
 
 # Vim supports client/server mode and is *not* running.
 if [ ! -z "$vserver" -a -z "$running" ]; then
@@ -41,7 +56,20 @@ elif [ ! -z "$vserver" -a ! -z "$running" ]; then
     # Check if any arguments were given.
     if [ -z "$@" ]; then
         # No arguments, focusing running gvim..
-        xdotool windowactivate "$(xdotool search --name VIM | tail -n 1)"
+        case "$platform" in
+            darwin)
+            # No focus necessary on Darwin.
+            ;;
+            bsd|gnu/linux|linux|unix)
+            xdotool windowactivate "$(xdotool search --name VIM | tail -n 1)"
+            ;;
+            windows)
+            # No focus necessary on Windows.
+            ;;
+            *)
+            echo "Unknown platform \"$platform\"."
+        esac
+
     else
         # Opening $@ on running gvim..
         "$gvim" --servername VIM --remote-wait "$@"

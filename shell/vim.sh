@@ -17,10 +17,10 @@ case "$platform" in
     vim='/Applications/MacVim.app/Contents/bin/vim'
     ;;
     bsd|gnu/linux|linux|unix)
-    vim='/usr/bin/vim'
+    vim='vim'
     ;;
     windows)
-    vim='/mnt/c/Program Files/Vim/vim82/vim.exe'
+    vim='vim.exe'
     ;;
     *)
     echo "Unknown platform \"$platform\"."
@@ -39,10 +39,7 @@ if [ ! -z "$vserver" -a -z "$running" ]; then
 # Vim supports client/server mode and *is* running.
 elif [ ! -z "$vserver" -a ! -z "$running" ]; then
     # Check if any arguments were given.
-    if [ -z "$@" ]; then
-        # No arguments, focusing running vim..
-        xdotool windowactivate "$(xdotool search --name VIM | tail -n 1)"
-    else
+    if [ ! -z "$@" ]; then
         # Opening $@ on running vim..
         "$vim" --servername VIM --remote-wait "$@"
     fi
