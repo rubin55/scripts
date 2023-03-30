@@ -1,6 +1,6 @@
 $servers = "logic.home.local"
 $location = "C:\Program Files\UMS"
-$command = "C:\Program Files\Java\jetbrains-jdk11\bin\javaw.exe"
+$command = "C:\Program Files\Java\jetbrains-jdk17\bin\javaw.exe"
 $arguments = "-Xmx768M", "-Djava.net.preferIPv4Stack=true", "-Dfile.encoding=UTF-8", "-classpath", "update.jar;ums.jar", "net.pms.PMS"
 $style = "Normal"
 
