@@ -17,7 +17,7 @@ case "$platform" in
     vim='/Applications/MacVim.app/Contents/bin/vim'
     ;;
     bsd|gnu/linux|linux|unix)
-    vim='vim'
+    vim='/usr/bin/vim'
     ;;
     windows)
     vim='vim.exe'
@@ -34,8 +34,14 @@ vserver="$("$vim" --version | grep -w '+clientserver')"
 
 # Vim supports client/server mode and is *not* running.
 if [ ! -z "$vserver" -a -z "$running" ]; then
-    # Starting new vim to open $@..
-    "$vim" --servername VIM -f "$@"
+    # Check if any arguments were given.
+    if [ ! -z "$@" ]; then
+        # Starting new vim to open $@..
+        "$vim" --servername VIM -f "$@"
+    else
+        # Starting new vim..
+        "$vim" --servername VIM
+    fi
 # Vim supports client/server mode and *is* running.
 elif [ ! -z "$vserver" -a ! -z "$running" ]; then
     # Check if any arguments were given.
