@@ -8,8 +8,7 @@ from jira import JIRA
 # Example ~/.jira.ini
 # [jira]
 # instance = https://jira.example.com/jira
-# username = someuser
-# password = somepass
+# token = sometoken
 # query = project = FBS AND issuetype not in (Epic, Sub-task) AND status in (Open, "In Progress") ORDER BY key ASC
 #
 # Check if ~/.jira.ini exists.
@@ -22,7 +21,7 @@ else:
     exit(3)
 
 # Jira connection object.
-jira = JIRA(config['jira']['instance'], basic_auth=(config['jira']['username'], config['jira']['password']), validate=True)
+jira = JIRA(config['jira']['instance'], token_auth=(config['jira']['token']), validate=True)
 
 # Issue list.
 issues = jira.search_issues(config['jira']['query'], maxResults=1000, fields=['status', 'summary'])
