@@ -1,5 +1,12 @@
 #!/bin/bash
 
+# Only run on ThinkPads.
+lsmod | grep -q thinkpad_acpi
+if [ $? -gt 0 ]; then
+    echo "Not a thinkpad, exiting.."
+    exit $?
+fi
+
 # Which device do you want to adjust for.
 id=16
 
