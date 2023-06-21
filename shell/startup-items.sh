@@ -54,6 +54,7 @@ runOnce set-xrandr-scaling-mode.sh
 runOnce fix-thinkpad-trackpoint-mouse-speed.sh
 runOnce pipewire
 runOnce pipewire-pulse
+runOnce wireplumber
 runOnce tpmmld -d
 runOnce syncthing --no-browser
 runOnce sunshine

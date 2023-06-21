@@ -1,9 +1,15 @@
 #!/bin/bash
 
+# Only run on X11 sessions.
+if [ "$XDG_SESSION_TYPE" != "x11" ]; then
+    echo "Running session is not x11, but "$XDG_SESSION_TYPE". Exiting.."
+    exit 1
+fi
+
 # Only run on ThinkPads.
 lsmod | grep -q thinkpad_acpi
 if [ $? -gt 0 ]; then
-    echo "Not a thinkpad, exiting.."
+    echo "Not a ThinkPad. Exiting.."
     exit $?
 fi
 

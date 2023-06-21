@@ -1,6 +1,6 @@
 @echo off
 
-set svc=postgresql-x64-12
+set svc=postgresql
 set cmd=%1
 
 2>nul call :%cmd%
