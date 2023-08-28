@@ -3,12 +3,13 @@
 rem Note: You can create parameterized shortcuts with PowerShell, like this:
 rem powershell "$s=(New-Object -COM WScript.Shell).CreateShortcut('x.lnk');$s.TargetPath='launch-amiga-app';$s.Arguments='Games:RickDangerous/RickDangerous';$s.Save()"
 
+rem Check for arguments.
 if not "%1"=="" (
   setlocal enabledelayedexpansion
 
+  rem A few environment variables.
   set winuaeExecutable=C:\Program Files\WinUAE\winuae64.exe
   set winuaeConfiguration=C:\Users\rubin\Syncthing\Emulation\Commodore Amiga\Configurations\Rubin's A1200 ^(PAL, HiRes^).uae
-
   set systemDiskLocation=C:\Users\rubin\Syncthing\Emulation\Commodore Amiga\Hard Directories\System
   set startupSequenceTemplate=!systemDiskLocation!\S\startup-sequence.wbrun
 
