@@ -1,6 +1,6 @@
 #!/bin/sh
 
-DISCONF=disable_services.conf
+DISCONF=hpux-toggleservices.conf
 
 if [ ! -e $DISCONF ] ; then
 	print "Configuration file not found, exiting..."
