@@ -26,7 +26,7 @@ if [ -z "$new_origin_root" ]; then
     error "Please specify a new origin root!" 3
 fi
 
-echo "Checking \"$dir\" recursively for git repositories."
+echo "Checking '$dir_to_work_on' recursively for git repositories."
 echo "Will rewrite any origin which matches old origin root to new origin" 
 echo "root. You have 10 seconds to change your mind.."
 echo ""
@@ -34,7 +34,7 @@ echo "  * Working directory:     '$dir_to_work_on'"
 echo "  * Old origin root:       '$old_origin_root'"
 echo "  * New origin root:       '$new_origin_root'"
 echo ""
-sleep 1
+sleep 10
 
 
 for i in `find "$dir_to_work_on" -type d -name .git`; do 
