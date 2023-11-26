@@ -39,6 +39,6 @@ for i in `find "$dir" -type d -name .git`; do
 	test $? -eq 0 || error "git clean failed with exit code $?" $?
 	git gc
 	test $? -eq 0 || error "git gc failed with exit code $?" $?
-	cd - 2> /dev/null
+	cd - > /dev/null
 	echo ""
 done
