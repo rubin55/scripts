@@ -14,7 +14,7 @@ error() {
 }
 
 if [ ! -d "$dir" ]; then
-    error "Please specify a directory to fsck." 1
+    error "Please specify a directory to reset." 1
 fi
 
 echo "Checking \"$dir\" recursively for git repositories."
@@ -24,7 +24,7 @@ echo ""
 sleep 10
 
 
-for i in `find "$dir" -type d -name .git`; do 
+for i in `find "$dir" -type d -name .git`; do
 	echo "Working on $i:"
 	cd "$i/.."
 	git reflog expire --stale-fix --all

@@ -21,7 +21,7 @@ count=1
 for gitdir in $gitdirs; do
   echo -ne "Checking ${count} of ${gitdirs_count}.."'\r' 1>&2
   repo=$(basename $(dirname $gitdir))
-  cd "$repo"
+  cd "$gitdir/.."
   check=$(git pull --all --quiet)
   if [ "$check" ]; then
     echo "$repo" >> "$output"
