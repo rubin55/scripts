@@ -9,7 +9,7 @@ if [ ! -d "$root" ]; then
 fi
 
 # Define output file, make sure it's non-existing.
-output=/tmp/git-dirstatus.out
+output=/tmp/git-dirupdate.out
 rm -f "$output"
 
 # What are we working on, initialize counters.
