@@ -8,9 +8,10 @@ if [ ! -d "$root" ]; then
   exit 1
 fi
 
-# Define output file, make sure it's non-existing.
-output=/tmp/git-dirstatus.out
-rm -f "$output"
+# Define output files, make sure it's non-existing.
+right=/tmp/git-dirupdate.right
+wrong=/tmp/git-dirupdate.wrong
+rm -f "$right" "$wrong"
 
 # What are we working on, initialize counters.
 gitdirs="$(find "$root" -type d -name .git)"
@@ -22,9 +23,17 @@ for gitdir in $gitdirs; do
   echo -ne "Checking ${count} of ${gitdirs_count}.."'\r' 1>&2
   repo=$(basename $(dirname $gitdir))
   cd "$gitdir/.."
-  check=$(git status -s)
-  if [ "$check" ]; then
-    echo "$repo" >> "$output"
+  
+  # Execute git status; if not exit 0, something went
+  # wrong. If exit 0, then check if we have output. If
+  # we do, something changed so tell us about it.
+  check="$(git status -s 2>&1)"
+  if [ $? != 0 ]; then
+    echo "$repo" >> "$wrong"
+  else
+    if [ "$check" ]; then
+      echo "$repo" >> "$right"
+    fi
   fi
   cd - >/dev/null
   ((count=count+1))
@@ -34,5 +43,14 @@ done
 echo "" 1>&2
 
 # If we have output, print it, and cleanup.
-[ -e "$output" ] && cat "$output"
-rm -f "$output"
+if [ -e "$right" ]; then
+  echo ""
+  echo "The following repositories have changes:" 1>&2  
+  cat "$right"
+fi
+
+if [ -e "$wrong" ]; then 
+  echo ""
+  echo "The following repositories had errors while trying to check status:" 1>&2
+  cat "$wrong" 1>&2
+fi

@@ -8,9 +8,10 @@ if [ ! -d "$root" ]; then
   exit 1
 fi
 
-# Define output file, make sure it's non-existing.
-output=/tmp/git-dirupdate.out
-rm -f "$output"
+# Define output files, make sure it's non-existing.
+right=/tmp/git-dirupdate.right
+wrong=/tmp/git-dirupdate.wrong
+rm -f "$right" "$wrong"
 
 # What are we working on, initialize counters.
 gitdirs="$(find "$root" -type d -name .git)"
@@ -22,10 +23,18 @@ for gitdir in $gitdirs; do
   echo -ne "Checking ${count} of ${gitdirs_count}.."'\r' 1>&2
   repo=$(basename $(dirname $gitdir))
   cd "$gitdir/.."
-  check=$(git pull --all 2>&1)
-  echo "$check" | grep -q 'Already up to date.'
+  
+  # Execute git pull; if not exit 0, it's wrong.
+  # If exit 0, then check if output indicates it's
+  # up-to-date, if not, tell us we actually updated.
+  check="$(git pull --all 2>&1)"
   if [ $? != 0 ]; then
-    echo "$repo" >> "$output"
+    echo "$repo" >> "$wrong"
+  else
+    echo "$check" | grep -q 'Already up to date.'
+    if [ $? != 0 ]; then
+      echo "$repo" >> "$right"
+    fi
   fi
   cd - >/dev/null
   ((count=count+1))
@@ -35,5 +44,15 @@ done
 echo "" 1>&2
 
 # If we have output, print it, and cleanup.
-[ -e "$output" ] && cat "$output"
-rm -f "$output"
+if [ -e "$right" ]; then
+  echo ""
+  echo "The following repositories were updated:" 1>&2  
+  cat "$right"
+fi
+
+if [ -e "$wrong" ]; then 
+  echo ""
+  echo "The following repositories had errors while trying to update:" 1>&2
+  cat "$wrong" 1>&2
+fi
+
