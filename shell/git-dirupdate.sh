@@ -45,13 +45,13 @@ echo "" 1>&2
 
 # If we have output, print it, and cleanup.
 if [ -e "$right" ]; then
-  echo ""
+  echo "" 1>&2
   echo "The following repositories were updated:" 1>&2  
   cat "$right"
 fi
 
 if [ -e "$wrong" ]; then 
-  echo ""
+  echo "" 1>&2
   echo "The following repositories had errors while trying to update:" 1>&2
   cat "$wrong" 1>&2
 fi
