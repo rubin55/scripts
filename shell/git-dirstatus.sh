@@ -14,14 +14,13 @@ wrong=/tmp/git-dirupdate.wrong
 rm -f "$right" "$wrong"
 
 # What are we working on, initialize counters.
-gitdirs="$(find "$root" -type d -name .git)"
-gitdirs_count=$(echo "$gitdirs" | wc -l)
+readarray -d '' gitdirs < <(find "$root" -type d -name .git -print0)
 count=1
 
 # Do the work.
-for gitdir in $gitdirs; do
-  echo -ne "Checking ${count} of ${gitdirs_count}.."'\r' 1>&2
-  repo=$(basename $(dirname $gitdir))
+for gitdir in "${gitdirs[@]}"; do
+  echo -ne "Checking ${count} of ${#gitdirs[@]}.."'\r' 1>&2
+  repo="$(basename "$(dirname "$gitdir")")"
   cd "$gitdir/.."
   
   # Execute git status; if not exit 0, something went
