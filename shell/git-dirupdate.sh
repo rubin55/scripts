@@ -22,8 +22,9 @@ for gitdir in $gitdirs; do
   echo -ne "Checking ${count} of ${gitdirs_count}.."'\r' 1>&2
   repo=$(basename $(dirname $gitdir))
   cd "$gitdir/.."
-  check=$(git pull --all --quiet)
-  if [ "$check" ]; then
+  check=$(git pull --all 2>&1)
+  echo "$check" | grep -q 'Already up to date.'
+  if [ $? != 0 ]; then
     echo "$repo" >> "$output"
   fi
   cd - >/dev/null
