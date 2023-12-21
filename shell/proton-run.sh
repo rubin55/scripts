@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Default steam path.
-STEAM="$HOME/.local/share/steam"
+STEAM="$HOME/.local/share/Steam"
 
 # Default proton used.
 PROTON="$HOME/Steam/steamapps/common/Proton - Experimental/proton"
