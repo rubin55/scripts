@@ -4,7 +4,7 @@ red='\033[0;31m'
 none='\033[0m'
 
 echo -e ""
-echo -e "Press ${red}Ctrl-B${none} followed by a command character below:"
+echo -e "Press ${red}Ctrl B${none} followed by a command character below:"
 echo -e ""
 echo -e ""
 echo -e "Session Commands:"
@@ -39,3 +39,10 @@ echo -e "    ${red}}${none} Swap the position of the current pane with the next.
 echo -e "    ${red}{${none} Swap the position of the current pane with the previous."
 echo -e "    ${red}X${none} Close the current pane."
 echo -e ""
+echo -e ""
+echo -e "Resize Commands:"
+echo -e ""
+echo -e "    ${red}Ctrl ←${none} Resize pane towards the left."
+echo -e "    ${red}Ctrl →${none} Resize pane towards the right."
+echo -e "    ${red}Ctrl ↓${none} Resize pane towards below."
+echo -e "    ${red}Ctrl ↑${none} Resize pane towards above."
