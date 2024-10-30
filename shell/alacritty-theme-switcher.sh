@@ -11,7 +11,9 @@ case $arg in
     ls "$config_dir/themes/themes/"
     ;;
     *)
-    sed -i "s|\"~/.config/alacritty/themes/themes/.*.toml\"|\"~/.config/alacritty/themes/themes/$arg.toml\"|g" "$config_dir/alacritty.toml"
+    if [ -e "$config_dir/themes/themes/$arg" ]; then
+        sed -i "s|\"~/.config/alacritty/themes/themes/.*.toml\"|\"~/.config/alacritty/themes/themes/$arg\"|g" "$config_dir/alacritty.toml"
+    fi
     ;;
 esac
 
