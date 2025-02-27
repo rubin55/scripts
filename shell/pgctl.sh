@@ -62,15 +62,16 @@ case $1 in
     printStatus
     ;;
     start)
-    if [ $(printStatus) == stopped ]; then
-        pg_ctl -D "$pgData" start
+    if [ "$(printStatus)" == stopped ]; then
+        pg_ctl -D "$pgData" start -l "$pgData/postgresql.log"
+        echo "logging to $pgData/postgresql.log"
     else
         echo "Server is already running."
         exit 1
     fi
     ;;
     stop)
-    if [ $(printStatus) == started ]; then
+    if [ "$(printStatus)" == started ]; then
         pg_ctl -D "$pgData" stop
     else
         echo "Server is already stopped."
