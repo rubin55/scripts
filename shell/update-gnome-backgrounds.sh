@@ -34,7 +34,7 @@ for file in "$source_dir"/*; do
         file_link="$target_dir/$file_date-$file_name"
 
         # Tell us about it
-        echo "Linking to $file_link"
+        echo "Linking $file_link"
 
         # Create a hard link in the target directory
         ln -f "$file" "$file_link"
