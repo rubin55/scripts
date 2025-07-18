@@ -26,19 +26,23 @@ fi
 for file in "$source_dir"/*; do
     # Check if it is a file
     if [ -f "$file" ]; then
-        # Get the filename and the date of the file
-        file_name=$(basename "$file")
-        file_date=$(date -r "$file" "+%Y-%m-%d-%H-%M-%S")
+        # Get the name and the date of the file
+        name=$(basename "$file")
+        date=$(date -r "$file" "+%Y-%m-%d-%H-%M-%S")
 
         # Create the target filename
-        file_link="$target_dir/$file_date-$file_name"
+        link="$target_dir/$date-$name"
 
-        if [ ! -f "$file_link" ]; then
+        # Check inodes
+        file_inode=$(ls -i "$file" | awk '{print $1}')
+        link_inode=$(ls -i "$link" 2> /dev/null | awk '{print $1}')
+
+        if [ "$file_inode" != "$link_inode" ]; then
             # Tell us about it
-            echo "Linking $file_link"
+            echo "Linking $link"
 
             # Create a hard link in the target directory
-            ln -f "$file" "$file_link"
+            ln -f "$file" "$link"
         fi
     fi
 done
