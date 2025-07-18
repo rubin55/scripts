@@ -33,10 +33,12 @@ for file in "$source_dir"/*; do
         # Create the target filename
         file_link="$target_dir/$file_date-$file_name"
 
-        # Tell us about it
-        echo "Linking $file_link"
+        if [ ! -f "$file_link" ]; then
+            # Tell us about it
+            echo "Linking $file_link"
 
-        # Create a hard link in the target directory
-        ln -f "$file" "$file_link"
+            # Create a hard link in the target directory
+            ln -f "$file" "$file_link"
+        fi
     fi
 done
