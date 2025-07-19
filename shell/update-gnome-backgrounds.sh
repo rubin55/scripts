@@ -23,7 +23,8 @@ if [ ! -d "$target_dir" ]; then
 fi
 
 # Iterate over each file in the source directory
-for file in "$source_dir"/*; do
+shopt -s nocaseglob
+for file in "$source_dir"/*.{jpeg,jpg,png,tga}; do
     # Check if it is a file
     if [ -f "$file" ]; then
         # Get the name and the date of the file
