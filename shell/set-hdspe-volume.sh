@@ -4,12 +4,13 @@
 #
 # [Unit]
 # After=wireplumber.service
-# Description=Set default HDSPE output volume to 25%
-#
+# Description=Lower HDSPe Volume Default
+
 # [Service]
-# ExecStart=/where/i/keep/my/scripts/set-hdspe-volume.sh 25%
+# ExecStartPre=sleep 10
+# ExecStart=%h/Source/Rubin/scripts/shell/set-hdspe-volume.sh
 # Type=OneShot
-#
+
 # [Install]
 # WantedBy=graphical-session.target
 
@@ -20,27 +21,49 @@ function append_percentage() {
     echo "${v}%"
 }
 
+# Base64 string with one second of 192kHz silent stereo.
+b="ZkxhQwAAACIQABAAAAAQAAASLuADcAAC7gBUq0XtMpyfC/3v/250dTRZhAAAKCAAAAByZWZlcmVuY2UgbGliRkxBQyAxLjUuMCAyMDI1MDIxMQAAAAD/+MMcABEAAAAAAAAAAIDC//jDHAEWAAAAAAAAAADz9v/4wxwCHwAAAAAAAAAAZqr/+MMcAxgAAAAAAAAAABWe//jDHAQNAAAAAAAAAADMF//4wxwFCgAAAAAAAAAAvyP/+MMcBgMAAAAAAAAAACp///jDHAcEAAAAAAAAAABZS//4wxwIKQAAAAAAAAAAGWj/+MMcCS4AAAAAAAAAAGpc//jDHAonAAAAAAAAAAD/AP/4wxwLIAAAAAAAAAAAjDT/+MMcDDUAAAAAAAAAAFW9//jDHA0yAAAAAAAAAAAmif/4wxwOOwAAAAAAAAAAs9X/+MMcDzwAAAAAAAAAAMDh//jDHBBhAAAAAAAAAAAzk//4wxwRZgAAAAAAAAAAQKf/+MMcEm8AAAAAAAAAANX7//jDHBNoAAAAAAAAAACmz//4wxwUfQAAAAAAAAAAf0b/+MMcFXoAAAAAAAAAAAxy//jDHBZzAAAAAAAAAACZLv/4wxwXdAAAAAAAAAAA6hr/+MMcGFkAAAAAAAAAAKo5//jDHBleAAAAAAAAAADZDf/4wxwaVwAAAAAAAAAATFH/+MMcG1AAAAAAAAAAAD9l//jDHBxFAAAAAAAAAADm7P/4wxwdQgAAAAAAAAAAldj/+MMcHksAAAAAAAAAAACE//jDHB9MAAAAAAAAAABzsP/4wxwg8QAAAAAAAAAAZmX/+MMcIfYAAAAAAAAAABVR//jDHCL/AAAAAAAAAACADf/4wxwj+AAAAAAAAAAA8zn/+MMcJO0AAAAAAAAAACqw//jDHCXqAAAAAAAAAABZhP/4wxwm4wAAAAAAAAAAzNj/+MMcJ+QAAAAAAAAAAL/s//jDHCjJAAAAAAAAAAD/z//4wxwpzgAAAAAAAAAAjPv/+MMcKscAAAAAAAAAABmn//jDHCvAAAAAAAAAAABqk//4wxws1QAAAAAAAAAAsxr/+MMcLdIAAAAAAAAAAMAu//hzHC4N//YAAAAAAAAAAK++"
+
+# Create silence.flac from base64 above (if non-existing).
+f="/tmp/silence.flac"
+if [ ! -e "$f" ]; then
+  echo "$b" | base64 -d - > "$f"
+fi
+
+# First play a short sub-second 192kHz audio
+# file silently.. for some reason command-line
+# control of pipewire/wireplumber does not work
+# if this is not done first?
+echo "Playing $f at 0% volume.."
+pw-play --volume 0 "$f"
+
 # Get value from first argument or 25,
 # ensure single percentage sign appended.
 v=$(append_percentage "${1:-25}")
 
-# We're assuming a RME HDSPe AIO Pro
-# here, which has 16 output channels.
-amixer -c0 -sq <<-EOF
-    set Chn,1 "$v"
-    set Chn,2 "$v"
-    set Chn,3 "$v"
-    set Chn,4 "$v"
-    set Chn,5 "$v"
-    set Chn,6 "$v"
-    set Chn,7 "$v"
-    set Chn,8 "$v"
-    set Chn,9 "$v"
-    set Chn,10 "$v"
-    set Chn,11 "$v"
-    set Chn,12 "$v"
-    set Chn,13 "$v"
-    set Chn,14 "$v"
-    set Chn,15 "$v"
-    set Chn,16 "$v"
-EOF
+# Obtain the device id for the card we want to control.
+s=$(pw-cli info "alsa_output.pci-0000_07_00.0.pro-output-0" | head -n 1 | awk '{print $2}')
+
+# Set volume on sink id $s
+echo "Setting volume to $v on device with id $s.."
+wpctl set-volume "$s" "$v"
+
+# Alternative way using ALSA.
+# amixer -c0 -sq <<-EOF
+#     set Chn,1 "$v"
+#     set Chn,2 "$v"
+#     set Chn,3 "$v"
+#     set Chn,4 "$v"
+#     set Chn,5 "$v"
+#     set Chn,6 "$v"
+#     set Chn,7 "$v"
+#     set Chn,8 "$v"
+#     set Chn,9 "$v"
+#     set Chn,10 "$v"
+#     set Chn,11 "$v"
+#     set Chn,12 "$v"
+#     set Chn,13 "$v"
+#     set Chn,14 "$v"
+#     set Chn,15 "$v"
+#     set Chn,16 "$v"
+# EOF
