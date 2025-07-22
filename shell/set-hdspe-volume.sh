@@ -35,10 +35,9 @@ f="/tmp/silence.flac"
 echo "$b" | base64 -d - > "$f"
 
 
-# First play a short sub-second 192kHz audio
-# file silently.. for some reason command-line
-# control of pipewire/wireplumber does not work
-# if this is not done first?
+# First play a one-second 192kHz audio file silently.
+# for some reason command-line control of pipewire and
+# wireplumber does not work if this is not done first.
 echo "Playing $f at 0% volume.."
 pw-play --volume 0 "$f"
 
