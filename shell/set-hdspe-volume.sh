@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# This script sets a volume $v of a sink $s with id $i. Additionally, it works
+# around weird pipewire / wireplumber behavior, where commandline tools like
+# wpctl do nothing when the pipewire graph has never played anything before,
+# by creating a silent flac file $f from a base64 string $b which is then fed
+# to pw-play at explicitly-set 0 volume.
+
 # Example unit file which runs this after wireplumber.
 #
 # [Unit]
@@ -41,12 +47,13 @@ pw-play --volume 0 "$f"
 # ensure single percentage sign appended.
 v=$(append_percentage "${1:-25}")
 
-# Obtain the device id for the card we want to control.
-s=$(pw-cli info "alsa_output.pci-0000_07_00.0.pro-output-0" | head -n 1 | awk '{print $2}')
+# Obtain the device id for the sink we want to control.
+s="alsa_output.pci-0000_07_00.0.pro-output-0"
+i="$(pw-cli info "$s" | head -n 1 | awk '{print $2}')"
 
-# Set volume on sink id $s
-echo "Setting volume to $v on device with id $s.."
-wpctl set-volume "$s" "$v"
+# Set volume on sink with id $i.
+echo "Setting volume to $v on device with id $i.."
+wpctl set-volume "$i" "$v"
 
 # Alternative way using ALSA.
 # amixer -c0 -sq <<-EOF
