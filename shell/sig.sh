@@ -23,24 +23,37 @@ error() {
   print "$@" 1>&2
 }
 
-if [[ ! " ${signal_list[*]} " =~ [[:space:]]${signal_name}[[:space:]] ]]; then
-  error "Error: signal '$signal_name' is not a valid signal name"
+# did you pass a signal name?
+if [[ -z $signal_name ]]; then
+  error "No signal name given"
   exit 1
 fi
 
-# Check if number or program name, create pids array.
+# Is it a valid signal name?
+if [[ ! " ${signal_list[*]} " =~ [[:space:]]${signal_name}[[:space:]] ]]; then
+  error "Error: signal '$signal_name' is not a valid signal name"
+  exit 3
+fi
+
+# Did you pass a program name or pid number?
+if [[ -z $program_or_pid ]]; then
+  error "No program name or pid given"
+  exit 2
+fi
+
+# Is that valid? If yes, create pids array.
 is_number='^[0-9]+$'
 if [[ $program_or_pid =~ $is_number ]]; then
   pids=($program_or_pid)
   if ! ps -p $pids > /dev/null 2>&1; then
     error "No running process found with pid $program_or_pid"
-    exit 2
+    exit 4
   fi
 else
   readarray -t pids < <(pidof $program_or_pid)
   if (( ${#pids[@]} == 0 )); then
     error "No pid(s) found for program named $program_or_pid"
-    exit 3
+    exit 5
   fi
 fi
 
