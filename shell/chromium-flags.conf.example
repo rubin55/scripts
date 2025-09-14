@@ -1,0 +1,13 @@
+--canvas-oop-rasterization
+--disable-features=GlobalShortcutsPortal,UseChromeOSDirectVideoDecoder
+--disable-gpu-memory-buffer-video-frames
+--enable-accelerated-2d-canvas
+--enable-accelerated-video-decode
+--enable-features=VaapiVideoDecoder,VaapiVideoEncoder,VaapiVideoDecodeLinuxGL,VaapiIgnoreDriverChecks,VaapiOnNvidiaGPUs
+--enable-hardware-overlays
+--enable-oop-rasterization
+--font-render-hinting=slight
+--gtk-version=4
+--ozone-patform-hint=wayland
+--use-gl=angle
+--use-vulkan
