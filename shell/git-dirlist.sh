@@ -4,13 +4,13 @@ root="$1"
 
 if [ ! -d "$root" ]; then
   echo "Please specify a directory to recursively check for git repositories."
-  echo "Will update each repository and return the name of any updated repositories."
+  echo "Will list each repository."
   exit 1
 fi
 
 # Define output files, make sure it's non-existing.
-right=/tmp/git-dirupdate.right
-wrong=/tmp/git-dirupdate.wrong
+right=/tmp/git-dirlist.right
+wrong=/tmp/git-dirlist.wrong
 rm -f "$right" "$wrong"
 
 # What are we working on, initialize counters.
@@ -23,17 +23,12 @@ for gitdir in "${gitdirs[@]}"; do
   repo="$(echo "$gitdir" | sed 's|^\./||; s|/\.git$||')"
   cd "$repo"
   
-  # Execute git pull; if not exit 0, it's wrong.
-  # If exit 0, then check if output indicates it's
-  # up-to-date, if not, tell us we actually updated.
-  check="$(git pull --all 2>&1)"
+  # Check if directory is actually a valid git repo.
+  check="$(git rev-parse --is-inside-work-tree 2>&1)"
   if [ $? != 0 ]; then
     echo "$repo" >> "$wrong"
   else
-    echo "$check" | grep -q 'Already up to date.'
-    if [ $? != 0 ]; then
-      echo "$repo" >> "$right"
-    fi
+    echo "$repo" >> "$right"
   fi
   cd - >/dev/null
   ((count=count+1))
@@ -45,13 +40,12 @@ echo "" 1>&2
 # If we have output, print it, and cleanup.
 if [ -e "$right" ]; then
   echo "" 1>&2
-  echo "The following repositories were updated:" 1>&2  
+  echo "The following repositories were found:" 1>&2  
   cat "$right"
 fi
 
 if [ -e "$wrong" ]; then 
   echo "" 1>&2
-  echo "The following repositories had errors while trying to update:" 1>&2
+  echo "The following repositories where found but had errors:" 1>&2
   cat "$wrong" 1>&2
 fi
-

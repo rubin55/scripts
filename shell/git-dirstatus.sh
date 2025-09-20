@@ -20,8 +20,8 @@ count=1
 # Do the work.
 for gitdir in "${gitdirs[@]}"; do
   echo -ne "Checking ${count} of ${#gitdirs[@]}.."'\r' 1>&2
-  repo="$(basename "$(dirname "$gitdir")")"
-  cd "$gitdir/.."
+  repo="$(echo "$gitdir" | sed 's|^\./||; s|/\.git$||')"
+  cd "$repo"
   
   # Execute git status; if not exit 0, something went
   # wrong. If exit 0, then check if we have output. If
