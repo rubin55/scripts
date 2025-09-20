@@ -9,8 +9,8 @@ if [ ! -d "$root" ]; then
 fi
 
 # Define output files, make sure it's non-existing.
-right=/tmp/git-dirupdate.right
-wrong=/tmp/git-dirupdate.wrong
+right=/tmp/git-dirstatus.right
+wrong=/tmp/git-dirstatus.wrong
 rm -f "$right" "$wrong"
 
 # What are we working on, initialize counters.
