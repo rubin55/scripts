@@ -67,11 +67,11 @@ case "$1" in
   list_themes
   ;;
   set)
-  mode="$2"
+  mode="$2" # Can be either dark or light, nothing else.
   [[ $mode == "dark" || $mode == "light" ]] && valid_mode="true" || valid_mode="false"
   
-  theme="$3"
-  [[ " ${themes[@]} " =~ " ${theme}.toml " ]] && valid_theme="true" || valid_theme="false"
+  theme="$3" # Can be an existing theme in theme_dir or an empty string.
+  [[ " ${themes[@]} " =~ " ${theme}.toml " || $theme == "" ]] && valid_theme="true" || valid_theme="false"
   
   if [[ $valid_mode == true && $valid_theme == true ]]; then
     apply_theme "$mode" "$theme"
