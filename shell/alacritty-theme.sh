@@ -63,7 +63,7 @@ function usage() {
 
 # Main case statement.
 case "$1" in
-  list)
+  list|ls)
   list_themes
   ;;
   set)
@@ -81,10 +81,10 @@ case "$1" in
     exit 1
   fi
   ;;
-  switch)
+  switch|toggle)
   switch_theme
   ;;
-  update)
+  update|up)
   update_themes
   ;;  
   *)
