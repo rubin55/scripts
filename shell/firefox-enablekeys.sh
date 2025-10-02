@@ -1,8 +1,11 @@
 #!/bin/sh
 
+echo "This script is really old, just here for historical purposes.."
+exit 1
+
 IFS=$'\x09'$'\x0A'$'\x0D'
 
-ENABLE_KEYS_PATCH="/home/rubin/Source/Shell/firefox_enablekeys.patch"
+ENABLE_KEYS_PATCH="firefox-enablekeys.patch"
 FIREFOX_HOME=/usr/lib/firefox-`rpm -q firefox | cut -d "-" -f 2`
 
 cd $FIREFOX_HOME/chrome
@@ -15,5 +18,4 @@ cd $FIREFOX_HOME/chrome
     echo "Cleaning up"
     rm -rf $FIREFOX_HOME/chrome/content/
 cd -
-
 
