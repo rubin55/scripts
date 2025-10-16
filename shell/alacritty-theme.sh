@@ -40,6 +40,16 @@ function apply_theme() {
   fi
 }
 
+function get_theme() {
+  local mode="$1"
+
+  if [[ -n $mode ]]; then
+    basename $(readlink "${config_dir}/${mode}_theme.toml" | sed "s|\.toml||")
+  else
+    basename "$active_theme"
+  fi
+}
+
 # Switch from dark to light and vice-versa.
 function switch_theme {
   target_mode=$([[ $active_mode == dark ]] && echo light || echo dark)
@@ -58,7 +68,7 @@ function update_themes {
 
 # Show usage help.
 function usage() {
-  print "Usage: $(basename "$0") list|set[light|dark <theme>]|switch|update"
+  print "Usage: $(basename "$0") list|random[light|dark]|set[light|dark <theme>]|switch|update"
 }
 
 # Main case statement.
@@ -66,11 +76,37 @@ case "$1" in
   list|ls)
   list_themes
   ;;
+  get)
+  mode="$2" # For get: can be dark, light or not specified.
+  [[ $mode == "dark" || $mode == "light" || $mode == "" ]] && valid_mode="true" || valid_mode="false"
+
+  if [[ $valid_mode == true ]]; then
+    get_theme "$mode"
+  else
+    [[ $valid_mode == false ]] && error 'Invalid mode specified; should be "dark" or "light"'
+    exit 1
+  fi
+  ;;
   set)
-  mode="$2" # Can be either dark or light, nothing else.
+  mode="$2" # For set: can be dark, light, nothing else.
   [[ $mode == "dark" || $mode == "light" ]] && valid_mode="true" || valid_mode="false"
   
   theme="$3" # Can be an existing theme in theme_dir or an empty string.
+  [[ " ${themes[@]} " =~ " ${theme}.toml " || $theme == "" ]] && valid_theme="true" || valid_theme="false"
+  
+  if [[ $valid_mode == true && $valid_theme == true ]]; then
+    apply_theme "$mode" "$theme"
+  else
+    [[ $valid_mode == false ]] && error 'Invalid mode specified; should be "dark" or "light"'
+    [[ $valid_theme == false ]] && error "Invalid theme specified; check $(basename "$0") list"
+    exit 1
+  fi
+  ;;
+  random)
+  mode="$2" # For random: can be dark, light, nothing else.
+  [[ $mode == "dark" || $mode == "light" ]] && valid_mode="true" || valid_mode="false"
+  
+  theme="$(echo ${themes[$((RANDOM % ${#themes[@]}))]} | sed "s|\.toml||")" # Select a random theme.
   [[ " ${themes[@]} " =~ " ${theme}.toml " || $theme == "" ]] && valid_theme="true" || valid_theme="false"
   
   if [[ $valid_mode == true && $valid_theme == true ]]; then
