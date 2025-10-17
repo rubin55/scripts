@@ -8,7 +8,7 @@ case "$1" in
   gsettings get org.gnome.desktop.interface accent-color | sed "s|'||g"
   ;;
   set)
-  gsettings set org.gnome.desktop.interface accent-color "$1"
+  gsettings set org.gnome.desktop.interface accent-color "$2"
   ;;
   *)
   echo "Usage: $(basename "$0") list|get|set <color>"
