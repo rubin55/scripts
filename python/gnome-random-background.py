@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import contextlib
 import cv2
 import os
 import json
@@ -25,8 +26,9 @@ def classify_directory(directory, reinit=False):
 
     # If reinit=True, throw away the cache.
     if reinit:
-        print(f"set-random-backgrounds: Removing '{cache_file}'")
-        pathlib.Path(cache_file).unlink()
+        with contextlib.suppress(FileNotFoundError):
+            print(f"gnome-random-background: Removing '{cache_file}'")
+            pathlib.Path(cache_file).unlink()
 
     # Initialize light and dark file lists from cache.
     if os.path.exists(cache_file):
@@ -49,7 +51,7 @@ def classify_directory(directory, reinit=False):
                 classification = 'dark'
             else:
                 classification = classify_image(path)
-                print(f"set-random-backgrounds: Classifying '{file_name}' as '{classification}'")
+                print(f"gnome-random-background: Classifying '{file_name}' as '{classification}'")
                 if classification == 'light':
                     light.append(file_url)
                 elif classification == 'dark':
@@ -70,7 +72,7 @@ def set(mode, urls):
 
     file_url = random.choice(urls)
     file_name = pathlib.Path(urllib.parse.unquote(urllib.parse.urlparse(file_url).path)).name
-    print(f"set-random-backgrounds: Setting {mode} background to '{file_name}'")
+    print(f"gnome-random-background: Setting {mode} background to '{file_name}'")
     subprocess.run(['gsettings', 'set', 'org.gnome.desktop.background',
                     target, file_url], capture_output=False)
 
@@ -93,7 +95,7 @@ def main():
 
     # Reclassify command
     reclassify_parser = subparsers.add_parser('reclassify')
-    reclassify_parser.set_defaults(reclassify=True)
+    reclassify_parser.set_defaults(light=False, dark=False, reclassify=True)
 
     args = parser.parse_args()
 
