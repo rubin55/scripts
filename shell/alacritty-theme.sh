@@ -68,7 +68,7 @@ function update_themes {
 
 # Show usage help.
 function usage() {
-  print "Usage: $(basename "$0") list|random[light|dark]|set[light|dark <theme>]|switch|update"
+  print "Usage: $(basename "$0") list|get [light|dark]|set [light|dark] <theme>|random [light|dark]|switch|update"
 }
 
 # Main case statement.
