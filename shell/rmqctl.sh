@@ -1,30 +1,39 @@
 #!/usr/bin/env bash
 
 # Global variables.
+hostname=$(hostname | cut -d '.' -f 1 | tr 'A-Z' 'a-z')
 platform=$(uname -s | tr '[:upper:]' '[:lower:]')
+mqserver=/usr/lib/rabbitmq/bin/rabbitmq-server
+mqctl=/usr/lib/rabbitmq/bin/rabbitmqctl
 
 # But if it's WSL..
 if [[ "$(uname -r)" =~ "Microsoft" ]]; then
         platform=windows
 fi
 
+export RABBITMQ_NODENAME=rabbit@$hostname
+export RABBITMQ_NODE_IP_ADDRESS=127.0.0.1
+export RABBITMQ_NODE_PORT=5672
+
 case "$platform" in
     darwin)
-        RABBITMQ_GENERATED_CONFIG_DIR="$HOME/Library/Application Support/RabbitMQ/genconf"
-        RABBITMQ_MNESIA_DIR="$HOME/Library/Application Support/RabbitMQ/mnesia"
-        RABBITMQ_LOG_BASE="$HOME/Library/Application Support/RabbitMQ/logs"
+        export RABBITMQ_CONFIG_FILE="$HOME/Library/Application Support/RabbitMQ/rabbitmq.conf"
+        export RABBITMQ_CONF_ENV_FILE="$HOME/Library/Application Support/RabbitMQ/rabbitmq-env.conf"
+        export RABBITMQ_ENABLED_PLUGINS_FILE="$HOME/Library/Application Support/RabbitMQ/enabled_plugins"
+        export RABBITMQ_MNESIA_BASE="$HOME/Library/Application Support/RabbitMQ/mnesia"
+        export RABBITMQ_LOG_BASE="$HOME/Library/Application Support/RabbitMQ/logs"
     ;;
     bsd|gnu/linux|linux|unix|windows)
-        RABBITMQ_GENERATED_CONFIG_DIR="$HOME/.rabbitmq/genconf"
-        RABBITMQ_MNESIA_DIR="$HOME/.rabbitmq/mnesia"
-        RABBITMQ_LOG_BASE="$HOME/.rabbitmq/logs"
+        export RABBITMQ_CONFIG_FILE="$HOME/.rabbitmq/rabbitmq.conf"
+        export RABBITMQ_CONF_ENV_FILE="$HOME/.rabbitmq/rabbitmq-env.conf"
+        export RABBITMQ_ENABLED_PLUGINS_FILE="$HOME/.rabbitmq/enabled_plugins"
+        export RABBITMQ_MNESIA_BASE="$HOME/.rabbitmq/mnesia"
+        export RABBITMQ_LOG_BASE="$HOME/.rabbitmq/logs"
     ;;
     *)
     echo "Unknown platform \"$platform\"."
     exit 1
 esac
-
-export RABBITMQ_GENERATED_CONFIG_DIR RABBITMQ_MNESIA_DIR RABBITMQ_LOG_BASE
 
 # Prints the standard help message for this utility.
 function printUsageText {
@@ -35,9 +44,13 @@ function printUsageText {
     status       - Show the status of the local RabbitMQ instance.
     start        - Start the local RabbitMQ instance.
     stop         - Stop the local RabbitMQ instance.
+    env          - A source-able environment.
     version      - Shows the version of the application.
     help         - Display this usage and help message.
 
+    Notes:
+    You can enable the management API with 
+    rabbitmq-plugins enable rabbitmq_management
     " | sed 's/^[[:space:]]*//'
 }
 
@@ -54,7 +67,7 @@ function printVersion {
 # Prints the running status.
 function printStatus {
     status=unknown
-    rabbitmqctl status > /dev/null 2>&1
+    $mqctl status > /dev/null 2>&1
     if [ $? == 0 ]; then
         status=started
     else
@@ -70,7 +83,7 @@ case $1 in
     ;;
     start)
     if [ $(printStatus) == stopped ]; then
-        rabbitmq-server -detached
+        $mqserver -detached
     else
         echo "Server is already running."
         exit 1
@@ -78,11 +91,14 @@ case $1 in
     ;;
     stop)
     if [ $(printStatus) == started ]; then
-        rabbitmqctl stop
+        $mqctl stop
     else
         echo "Server is already stopped."
         exit 1
     fi
+    ;;
+    env)
+    env | grep RABBITMQ | sed 's|^RABBITMQ_|export RABBITMQ_|'
     ;;
     version)
     printVersion
