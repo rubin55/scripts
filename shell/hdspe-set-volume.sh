@@ -6,7 +6,7 @@
 # by creating a silent flac file $f from a base64 string $b which is then fed
 # to pw-play at explicitly-set 0 volume.
 
-# Example unit file which runs this after wireplumber.
+# Example unit file which runs this after wireplumber:
 #
 # [Unit]
 # After=wireplumber.service
@@ -14,7 +14,7 @@
 
 # [Service]
 # ExecStartPre=sleep 10
-# ExecStart=%h/Source/Rubin/scripts/shell/set-hdspe-volume.sh
+# ExecStart=%h/Source/Rubin/scripts/shell/hdspe-set-volume.sh
 # Type=OneShot
 
 # [Install]
