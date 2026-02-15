@@ -82,7 +82,7 @@ while True:
     print(f'{name} (y/n/c) ', end='', flush=True)
     key = get_character()
     print(key)
-    if key == 'y':
+    if key == 'y' or key == '\n':
         subprocess.Popen(["steam", f"steam://rungameid/{app_id}"])
         break
     elif key == 'c':
