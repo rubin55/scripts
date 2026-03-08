@@ -28,5 +28,6 @@ red=${red%%.*}
 green=${green%%.*}
 blue=${blue%%.*}
 
-printf 'RGB: %s %s %s\n' "$red" "$green" "$blue"
-printf 'HEX: %02x%02x%02x\n' "$red" "$green" "$blue"
+# Output as hex and copy to clipboard
+printf '#%02x%02x%02x\n' "$red" "$green" "$blue"
+printf '#%02x%02x%02x' "$red" "$green" "$blue" | xclip -in -selection clipboard
