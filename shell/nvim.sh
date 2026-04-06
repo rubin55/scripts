@@ -24,45 +24,57 @@ if [ -S "$socket" ] && pgrep -u "$USER" nvim > /dev/null 2>&1; then
         # Open file(s) in the running nvim.
         "$nvim" --server "$socket" --remote "${abs_args[@]}"
 
-        # Neovim has no --remote-wait, so emulate it: install a one-shot
-        # autocmd in the remote nvim that touches a signal file when our
-        # buffer is closed, then wait for that file (or for nvim to exit).
+        # Neovim has no --remote-wait, so emulate it: install one-shot
+        # autocmds in the remote nvim that each append a marker to a signal
+        # file when their buffer is closed; wait until the file has one
+        # marker per opened file (or until nvim itself exits).
         sigfile=$(mktemp -u --tmpdir "nvim-wait.$$.XXXXXX")
         cmdfile=$(mktemp --suffix=.vim --tmpdir "nvim-wait.$$.XXXXXX")
         trap 'rm -f "$sigfile" "$cmdfile"' EXIT
 
-        # Track the first file passed (the "main" one).
-        first="${abs_args[0]}"
         # Escape single quotes for embedding in vim single-quoted strings
         # ('' is the escape inside a vim '...' literal).
-        first_esc=${first//\'/\'\'}
         sigfile_esc=${sigfile//\'/\'\'}
+        # Build a vim list literal of all target file paths.
+        targets_vim=""
+        for arg in "${abs_args[@]}"; do
+            arg_esc=${arg//\'/\'\'}
+            [ -n "$targets_vim" ] && targets_vim+=", "
+            targets_vim+="'$arg_esc'"
+        done
 
-        # Vim script that resolves the buffer for our file (using getbufinfo
-        # to do an exact name match — bufnr() does pattern matching which
-        # can pick up the wrong buffer) and installs a one-shot autocmd that
-        # touches the signal file when the buffer is deleted/wiped. If the
-        # buffer can't be found, signal immediately so we don't hang.
+        # Vim script that, for each target, exact-matches its buffer (bufnr()
+        # uses pattern matching which can pick up the wrong buffer) and
+        # installs a one-shot autocmd that appends a marker to the signal
+        # file when the buffer is deleted/wiped. If we can't find the buffer
+        # at all, append the marker immediately so the count stays correct.
         cat > "$cmdfile" <<VIMEOF
-let s:target = '$first_esc'
-let s:b = -1
-for s:buf in getbufinfo()
-  if s:buf.name ==# s:target
-    let s:b = s:buf.bufnr
-    break
+let s:targets = [$targets_vim]
+let s:sigfile = '$sigfile_esc'
+for s:target in s:targets
+  let s:b = -1
+  for s:buf in getbufinfo()
+    if s:buf.name ==# s:target
+      let s:b = s:buf.bufnr
+      break
+    endif
+  endfor
+  if s:b > 0
+    execute 'autocmd BufDelete,BufWipeout <buffer=' . s:b . '> ++once call writefile(["."], ''' . s:sigfile . ''', "a")'
+  else
+    call writefile(['.'], s:sigfile, 'a')
   endif
 endfor
-if s:b > 0
-  execute 'autocmd BufDelete,BufWipeout <buffer=' . s:b . '> ++once call writefile([], ''$sigfile_esc'')'
-else
-  call writefile([], '$sigfile_esc')
-endif
 VIMEOF
 
         "$nvim" --server "$socket" --remote-expr "execute('source $cmdfile')" >/dev/null
 
-        # Wait until the buffer is closed (autocmd touches sigfile) or nvim exits.
-        while [ ! -e "$sigfile" ]; do
+        # Wait until every opened buffer has been closed, or nvim exits.
+        total=${#abs_args[@]}
+        while true; do
+            count=0
+            [ -e "$sigfile" ] && count=$(wc -l < "$sigfile")
+            [ "$count" -ge "$total" ] && break
             sleep 0.3
             "$nvim" --server "$socket" --remote-expr "1" >/dev/null 2>&1 || break
         done
