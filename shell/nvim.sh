@@ -5,6 +5,18 @@ nvim='/usr/bin/nvim'
 # Socket path for the running nvim server.
 socket="${XDG_RUNTIME_DIR:-/tmp}/nvim-${USER}.sock"
 
+# Parse flags. -w makes the script wait until all opened files are closed
+# in the existing nvim instance (or nvim itself exits).
+wait_for_close=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -w) wait_for_close=1; shift ;;
+        --) shift; break ;;
+        -*) echo "Unknown flag: $1" >&2; exit 1 ;;
+        *)  break ;;
+    esac
+done
+
 # Check if nvim is running for the current user with our socket.
 if [ -S "$socket" ] && pgrep -u "$USER" nvim > /dev/null 2>&1; then
     # nvim is running.
@@ -23,6 +35,9 @@ if [ -S "$socket" ] && pgrep -u "$USER" nvim > /dev/null 2>&1; then
         done
         # Open file(s) in the running nvim.
         "$nvim" --server "$socket" --remote "${abs_args[@]}"
+
+        # Without -w, return immediately after opening the files.
+        [ "$wait_for_close" -eq 1 ] || exit 0
 
         # Neovim has no --remote-wait, so emulate it: install one-shot
         # autocmds in the remote nvim that each append a marker to a signal
