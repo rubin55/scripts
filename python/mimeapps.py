@@ -12,8 +12,18 @@ APP_DIRS = [
 ]
 
 RED = "\033[31m"
+YELLOW = "\033[33m"
+BLUE = "\033[34m"
 RESET = "\033[0m"
 COL = 32
+
+
+def blue(s):
+    return f"{BLUE}{s}{RESET}"
+
+
+def yellow(s):
+    return f"{YELLOW}{s}{RESET}"
 
 
 def find_desktop(name):
@@ -90,13 +100,16 @@ def rewrite(filter_fn):
     return new_entries, removed_mimes
 
 
-def tprint(key, value):
-    print(f"{key:<{COL}}{value}")
+def tprint(key, value, color=""):
+    """Print key padded to COL columns, optionally wrapping key in an ANSI color."""
+    end = RESET if color else ""
+    pad = " " * max(0, COL - len(key))
+    print(f"{color}{key}{end}{pad}{value}")
 
 
 def cmd_by_mime(assoc):
     for mime in sorted(assoc):
-        tprint(mime, ", ".join(assoc[mime]))
+        tprint(mime, ", ".join(blue(a) for a in assoc[mime]), YELLOW)
 
 
 def cmd_by_app(assoc):
@@ -105,14 +118,14 @@ def cmd_by_app(assoc):
         for app in apps:
             by_app[app].add(mime)
     for app in sorted(by_app):
-        tprint(app, ", ".join(sorted(by_app[app])))
+        tprint(app, ", ".join(yellow(m) for m in sorted(by_app[app])), BLUE)
 
 
 def cmd_check(assoc):
     apps = {a for app_list in assoc.values() for a in app_list}
     for app in sorted(apps):
         status = "found" if find_desktop(app) else f"{RED}not found{RESET}"
-        tprint(app, status)
+        tprint(app, status, BLUE)
 
 
 def cmd_prune():
@@ -130,9 +143,9 @@ def cmd_prune():
 
     new_entries, removed_mimes = rewrite(keep)
     for app in sorted(removed_apps):
-        print(f"removed app:  {app}")
+        print(f"removed app:  {blue(app)}")
     for mime in sorted(removed_mimes):
-        print(f"removed mime: {mime}")
+        print(f"removed mime: {yellow(mime)}")
     write_entries(new_entries)
 
 
@@ -141,10 +154,10 @@ def cmd_rm_mime(mime_arg):
         lambda mime, apps: [] if mime == mime_arg else apps
     )
     if not removed_mimes:
-        print(f"no entries found for mime: {mime_arg}")
+        print(f"no entries found for mime: {yellow(mime_arg)}")
         return
     for mime in removed_mimes:
-        print(f"removed mime: {mime}")
+        print(f"removed mime: {yellow(mime)}")
     write_entries(new_entries)
 
 
@@ -160,11 +173,11 @@ def cmd_rm_app(app_arg):
 
     new_entries, removed_mimes = rewrite(keep)
     if not found:
-        print(f"no entries found for app: {app_arg}")
+        print(f"no entries found for app: {blue(app_arg)}")
         return
-    print(f"removed app:  {target.removesuffix('.desktop')}")
+    print(f"removed app:  {blue(target.removesuffix('.desktop'))}")
     for mime in sorted(removed_mimes):
-        print(f"removed mime: {mime}")
+        print(f"removed mime: {yellow(mime)}")
     write_entries(new_entries)
 
 
