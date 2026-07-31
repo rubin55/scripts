@@ -78,6 +78,7 @@ while IFS= read -r p || [[ -n "$p" ]]; do
       echo
     fi
     rm -f "$build_err"
+    grep -vxF "$p" "$list_file" > "$list_file.tmp" && mv "$list_file.tmp" "$list_file"
     continue
   fi
   cat "$build_err" >&2
@@ -88,8 +89,7 @@ while IFS= read -r p || [[ -n "$p" ]]; do
     break
   fi
   # Build succeeded, remove p from list.
-  tmp="$list_file.tmp"
-  grep -vxF "$p" "$list_file" > "$tmp" && mv "$tmp" "$list_file"
+  grep -vxF "$p" "$list_file" > "$list_file.tmp" && mv "$list_file.tmp" "$list_file"
   echo
 done < "$list_read"
 
