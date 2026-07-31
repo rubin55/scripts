@@ -57,16 +57,32 @@ while IFS= read -r p || [[ -n "$p" ]]; do
   display="$(basename "$(dirname "$p")")/$(basename "$p")"
   title.append " ($n/$c: $display)"
   start=$SECONDS
+  build_out=$(mktemp)
+  build_err=$(mktemp)
+  title.line "($n/$c: $display)"
   (
     cd "$p" || exit 1
-    title.line "($n/$c: $display)"
     makepkg -cCs
-  )
-  rc=$?
+  ) 2> "$build_err" | tee "$build_out"
+  rc=${PIPESTATUS[0]}
   elapsed=$(( SECONDS - start ))
+  out_lines=$(wc -l < "$build_out")
+  rm -f "$build_out"
   total_sec=$(( total_sec + elapsed ))
   record+=( "$elapsed|$display" )
-  if [[ $rc -ne 0 && $rc -ne 13 ]]; then
+  if [[ $rc -eq 13 ]]; then
+    if [[ "$out_lines" -eq 0 ]]; then
+      printf '\033[2A\033[J\033[A'
+    else
+      cat "$build_err" >&2
+      echo
+    fi
+    rm -f "$build_err"
+    continue
+  fi
+  cat "$build_err" >&2
+  rm -f "$build_err"
+  if [[ $rc -ne 0 ]]; then
     log.error "$p did not go well, please fix..."
     failed=1
     break
@@ -74,6 +90,7 @@ while IFS= read -r p || [[ -n "$p" ]]; do
   # Build succeeded, remove p from list.
   tmp="$list_file.tmp"
   grep -vxF "$p" "$list_file" > "$tmp" && mv "$tmp" "$list_file"
+  echo
 done < "$list_read"
 
 title.line
@@ -82,12 +99,16 @@ if total_dur=$(format.duration "$total_sec"); then
   echo "Total time spent: ~$total_dur"
 fi
 
-echo "Longest running:"
-printf '%s\n' "${record[@]}" | sort -t'|' -k1 -rn | head -n 10 | while IFS='|' read -r sec name; do
+longest=$(printf '%s\n' "${record[@]}" | sort -t'|' -k1 -rn | head -n 10 | while IFS='|' read -r sec name; do
   if dur=$(format.duration "$sec"); then
-    echo "   - $name: $dur"
+    printf '   - %s: %s\n' "$name" "$dur"
   fi
-done
+done)
+
+if [[ -n "$longest" ]]; then
+  echo "Longest running:"
+  printf '%s\n' "$longest"
+fi
 
 # Cleanup.
 if ! (( ${failed:-0} )); then
