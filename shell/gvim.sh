@@ -50,24 +50,24 @@ vserver="$("$vim" --version | grep -w '+clientserver')"
 # Vim supports client/server mode and is *not* running.
 if [ ! -z "$vserver" -a -z "$running" ]; then
     # Check if any arguments were given.
-    if [ -z "$@" ]; then
+    if [ $# -eq 0 ]; then
         # Starting new gvim ..
-        "$gvim" --servername VIM
+        exec "$gvim" --servername VIM
     else
         # Starting new gvim to open $@..
-        "$gvim" --servername VIM -f "$@"
+        exec "$gvim" --servername VIM -f "$@"
     fi
 # Vim supports client/server mode and *is* running.
 elif [ ! -z "$vserver" -a ! -z "$running" ]; then
     # Check if any arguments were given.
-    if [ -z "$@" ]; then
+    if [ $# -eq 0 ]; then
         # No arguments, focusing running gvim..
         case "$platform" in
             darwin)
             # No focus necessary on Darwin.
             ;;
             bsd|gnu/linux|linux|unix)
-            xdotool windowactivate "$(xdotool search --name VIM | tail -n 1)"
+            exec xdotool windowactivate "$(xdotool search --name VIM | tail -n 1)"
             ;;
             windows)
             # No focus necessary on Windows.
@@ -78,10 +78,10 @@ elif [ ! -z "$vserver" -a ! -z "$running" ]; then
 
     else
         # Opening $@ on running gvim..
-        "$gvim" --servername VIM --remote-wait "$@"
+        exec "$gvim" --servername VIM --remote-wait "$@"
     fi
 # Vim does *not* support client/server mode.
 else
     # Opening $@ directly..
-    "$gvim" -f "$@"
+    exec "$gvim" -f "$@"
 fi

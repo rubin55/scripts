@@ -38,17 +38,17 @@ if [ -z "$running" ]; then
     "$emacs"
     sleep 4
     # Then attach with client.
-    if [ "$@" ]; then
-        "$emacsclient" "$@"
+    if [ $# -gt 0 ]; then
+        exec "$emacsclient" "$@"
     fi
 # Emacs *is* running.
 else
     # Check if any arguments were given.
-    if [ "$@" ]; then
+    if [ $# -gt 0 ]; then
         # Opening $@ on running emacs..
-        "$emacsclient" -n "$@"
+        exec "$emacsclient" -n "$@"
     else
         # No arguments, focusing running emacs..
-        xdotool windowactivate `xdotool search --name emacs | tail -n 1`
+        exec xdotool windowactivate `xdotool search --name emacs | tail -n 1`
     fi
 fi
