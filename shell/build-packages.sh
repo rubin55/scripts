@@ -88,7 +88,9 @@ sleep 3
 trap 'echo; title.line; report.times; exit 130' INT
 
 n=0
-while IFS= read -r p || [[ -n "$p" ]]; do
+# Read the list on fd 3 so makepkg and pacman keep the terminal on stdin
+# and can still prompt for build dependencies.
+while IFS= read -r p <&3 || [[ -n "$p" ]]; do
   n=$((n+1))
   display="$(basename "$(dirname "$p")")/$(basename "$p")"
   title.append " ($n/$c: $display)"
@@ -97,7 +99,7 @@ while IFS= read -r p || [[ -n "$p" ]]; do
   start=$SECONDS
   (
     cd "$p" || exit 1
-    makepkg -cCs --noconfirm
+    makepkg -cCs
   )
   rc=$?
   printf '%d|%s\n' "$(( SECONDS - start ))" "$display" >> "$time_file"
@@ -109,7 +111,7 @@ while IFS= read -r p || [[ -n "$p" ]]; do
     break
   fi
   list.done "$p"
-done < "$list_read"
+done 3< "$list_read"
 
 title.line
 report.times
