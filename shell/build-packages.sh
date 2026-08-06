@@ -97,7 +97,7 @@ while IFS= read -r p || [[ -n "$p" ]]; do
   start=$SECONDS
   (
     cd "$p" || exit 1
-    makepkg -cCs
+    makepkg -cCs --noconfirm
   )
   rc=$?
   printf '%d|%s\n' "$(( SECONDS - start ))" "$display" >> "$time_file"
