@@ -95,27 +95,14 @@ while IFS= read -r p || [[ -n "$p" ]]; do
   title.line "($n/$c: $display)"
 
   start=$SECONDS
-  build_out=$(mktemp)
-  build_err=$(mktemp)
   (
     cd "$p" || exit 1
     makepkg -cCs
-  ) 2> "$build_err" | tee "$build_out"
-  rc=${PIPESTATUS[0]}
+  )
+  rc=$?
   printf '%d|%s\n' "$(( SECONDS - start ))" "$display" >> "$time_file"
-  out_lines=$(wc -l < "$build_out")
-  rm -f "$build_out"
 
-  # 13 is "package already built". If makepkg also stayed silent, walk the
-  # cursor back over the header we just printed so skips leave no trace.
-  if (( rc == 13 )) && (( out_lines == 0 )); then
-    printf '\033[2A\033[J\033[A'
-  else
-    cat "$build_err" >&2
-    echo
-  fi
-  rm -f "$build_err"
-
+  # 13 is "package already built", which is not a failure.
   if (( rc != 0 && rc != 13 )); then
     log.error "$p did not go well, please fix..."
     failed=1
