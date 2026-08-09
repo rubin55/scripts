@@ -20,7 +20,7 @@ format.duration() {
 # Named filter groups. Edit to add your own.
 case "$1" in
   regular) filter() { grep -vE -- '-git|-hg|broken/'; } ;;
-  latest)  filter() { grep -vE -- 'broken/|llama|gguf' | grep -E -- '-git|-hg'; } ;;
+  latest)  filter() { grep -vE -- 'broken/|llama|gguf|nvidia' | grep -E -- '-git|-hg'; } ;;
   llama)   filter() { grep -v -- 'broken/' | grep -E -- 'llama|gguf'; } ;;
   *)
     echo "usage: $0 <group>"

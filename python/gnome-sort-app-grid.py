@@ -8,51 +8,75 @@ from itertools import batched
 os.environ.setdefault("XDG_CURRENT_DESKTOP", "GNOME")
 from gi.repository import Gio, GLib  # type: ignore[reportMissingModuleSource]  # noqa: E402
 
+# every stock grid mode holds 24 icons (3x8, 4x6, 6x4, 8x3)
 PAGE_SIZE = 24
+FOLDER_SCHEMA = "org.gnome.desktop.app-folders.folder"
 
 
-def collect_folders():
+def folder_name(folder, fid):
+    """Same rules as the shell's _getFolderName()."""
+    name = folder.get_string("name")
+    if not folder.get_boolean("translate"):
+        return name
+    dirs = [os.path.join(d, "desktop-directories") for d in
+            (GLib.get_user_data_dir(), *GLib.get_system_data_dirs())]
+    kf = GLib.KeyFile()
+    try:
+        kf.load_from_dirs(name, dirs, GLib.KeyFileFlags.NONE)
+        return kf.get_locale_string("Desktop Entry", "Name") or fid
+    except GLib.Error:
+        return name
+
+
+def visible_apps():
+    """Apps the shell puts in the grid: shown, not a dash favorite."""
+    favorites = set(Gio.Settings.new("org.gnome.shell").get_strv("favorite-apps"))
+    apps = {}
+    for ai in Gio.AppInfo.get_all():
+        did = ai.get_id()
+        if not did or did in apps or did in favorites or not ai.should_show():
+            continue
+        cats = (ai.get_categories() or "").split(";")  # type: ignore[attr-defined]
+        apps[did] = (ai.get_display_name() or ai.get_name(), set(filter(None, cats)))
+    return apps
+
+
+def collect_folders(apps):
+    """Return (folder entries, ids swallowed by a folder)."""
     s = Gio.Settings.new("org.gnome.desktop.app-folders")
-    members, names = set(), {}
+    entries, members = [], set()
     for fid in s.get_strv("folder-children"):
         folder = Gio.Settings.new_with_path(
-            "org.gnome.desktop.app-folders.folder",
-            f"/org/gnome/desktop/app-folders/folders/{fid}/",
+            FOLDER_SCHEMA, f"/org/gnome/desktop/app-folders/folders/{fid}/"
         )
-        members.update(a for a in folder.get_strv("apps") if a.endswith(".desktop"))
-        n = folder.get_string("name")
-        names[fid] = n if not n.startswith("@") else fid.title()
-    return members, names
+        cats = set(folder.get_strv("categories"))
+        contents = {a for a in folder.get_strv("apps") if a in apps}
+        contents |= {did for did, (_, c) in apps.items() if cats & c}
+        contents -= set(folder.get_strv("excluded-apps"))
+        if not contents:  # the shell hides empty folders
+            continue
+        members |= contents
+        entries.append((folder_name(folder, fid), fid))
+    return entries, members
 
 
 def main():
     locale.setlocale(locale.LC_ALL, "")
-    folder_members, folder_names = collect_folders()
 
-    entries = []
-    seen = set()
-    for ai in Gio.AppInfo.get_all():
-        if not ai.should_show():
-            continue
-        did, name = ai.get_id(), ai.get_display_name() or ai.get_name()
-        if did in folder_members or did in seen:
-            continue
-        seen.add(did)
-        entries.append((name, did))
-    entries += [(n, f"folder:{fid}") for fid, n in folder_names.items()]
+    apps = visible_apps()
+    entries, in_folder = collect_folders(apps)
+    entries += [(name, did) for did, (name, _) in apps.items() if did not in in_folder]
     entries.sort(key=lambda kv: locale.strxfrm(kv[0].casefold()))
 
     pages = [list(b) for b in batched((did for _, did in entries), PAGE_SIZE)] or [[]]
+    layout = GLib.Variant("aa{sv}", [
+        {did: GLib.Variant("a{sv}", {"position": GLib.Variant("i", pos)})
+         for pos, did in enumerate(page)}
+        for page in pages
+    ])
 
-    text = "[" + ", ".join(
-        "{" + ", ".join(f"'{did}': <{{'position': <{pos}>}}>" for pos, did in enumerate(p)) + "}"
-        for p in pages
-    ) + "]"
-
-    Gio.Settings.new("org.gnome.shell").set_value(
-        "app-picker-layout", GLib.Variant.parse(None, text, None, None)
-    )
-    print(f"Sorted {len(entries)} apps across {len(pages)} pages.")
+    Gio.Settings.new("org.gnome.shell").set_value("app-picker-layout", layout)
+    print(f"Sorted {len(entries)} items across {len(pages)} pages.")
 
 
 if __name__ == "__main__":
