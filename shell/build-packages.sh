@@ -19,12 +19,17 @@ format.duration() {
 
 # Named filter groups. Edit to add your own.
 case "$1" in
-  regular) filter() { grep -vE -- '-git|-hg|broken/'; } ;;
-  latest)  filter() { grep -vE -- 'broken/|llama|gguf|nvidia' | grep -E -- '-git|-hg'; } ;;
-  llama)   filter() { grep -v -- 'broken/' | grep -E -- 'llama|gguf'; } ;;
+  all) filter() { grep -vE -- '-git|-hg|broken/'; } ;;
+  git) filter() { grep -vE -- 'broken/|llama|gguf|nvidia' | grep -E -- '-git|-hg'; } ;;
+  llama) filter() { grep -v -- 'broken/|cuda' | grep -E -- 'llama|gguf'; } ;;
+  nvidia) filter() { grep -v -- 'broken/' | grep -E -- 'nvidia|cuda'; } ;;
+  chromium) filter() { grep -v -- 'broken/' | grep -E -- 'chromium'; } ;;
+  custom) filter() { grep -v -- 'broken/|chromium' | grep -E -- 'custom/'; } ;;
+  others) filter() { grep -v -- 'broken/' | grep -E -- 'others/'; } ;;
+  mine) filter() { grep -v -- 'broken/' | grep -E -- 'mine/'; } ;;
   *)
     echo "usage: $0 <group>"
-    echo "groups: regular, latest, llama"
+    echo "groups: all, git, llama, nvidia, chromium, custom, others, mine"
     [[ -z "$1" ]] && exit 0
     exit 1
     ;;
