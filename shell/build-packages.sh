@@ -19,17 +19,18 @@ format.duration() {
 
 # Named filter groups. Edit to add your own.
 case "$1" in
-  all) filter() { grep -vE -- 'broken/'; } ;;
-  git) filter() { grep -vE -- 'broken/|chromium|llama|gguf|nvidia|cuda' | grep -E -- '-git|-hg'; } ;;
-  llama) filter() { grep -v -- 'broken/|nvidia|cuda' | grep -E -- 'llama|gguf'; } ;;
-  nvidia) filter() { grep -v -- 'broken/|llama|gguf' | grep -E -- 'nvidia|cuda'; } ;;
-  chromium) filter() { grep -v -- 'broken/' | grep -E -- 'chromium'; } ;;
-  custom) filter() { grep -v -- 'broken/|chromium|llama|gguf|nvidia|cuda' | grep -E -- 'custom/'; } ;;
-  others) filter() { grep -v -- 'broken/|chromium|llama|gguf|nvidia|cuda' | grep -E -- 'others/'; } ;;
-  mine) filter() { grep -v -- 'broken/|chromium|llama|gguf|nvidia|cuda' | grep -E -- 'mine/'; } ;;
+  all) filter() {      grep -vE -- 'broken/'; } ;;
+  git) filter() {      grep -vE -- 'broken/|chromium|llama|gguf|nvidia|cuda|linux-tachyon' | grep -E -- '-git|-hg'; } ;;
+  linux) filter() {    grep -vE -- 'broken/|chromium|llama|gguf|nvidia|cuda'               | grep -E -- 'linux-tachyon'; } ;;
+  llama) filter() {    grep -vE -- 'broken/|nvidia|cuda|linux-tachyon'                     | grep -E -- 'llama|gguf'; } ;;
+  nvidia) filter() {   grep -vE -- 'broken/|llama|gguf|linux-tachyon'                      | grep -E -- 'nvidia|cuda'; } ;;
+  chromium) filter() { grep -vE -- 'broken/|llama|gguf|nvidia|cuda|linux-tachyon'          | grep -E -- 'chromium'; } ;;
+  custom) filter() {   grep -vE -- 'broken/|chromium|llama|gguf|nvidia|cuda|linux-tachyon' | grep -E -- 'custom/'; } ;;
+  others) filter() {   grep -vE -- 'broken/|chromium|llama|gguf|nvidia|cuda|linux-tachyon' | grep -E -- 'others/'; } ;;
+  mine) filter() {     grep -vE -- 'broken/|chromium|llama|gguf|nvidia|cuda|linux-tachyon' | grep -E -- 'mine/'; } ;;
   *)
     echo "usage: $0 <group>"
-    echo "groups: all, git, llama, nvidia, chromium, custom, others, mine"
+    echo "groups: all, git, linux llama, nvidia, chromium, custom, others, mine"
     [[ -z "$1" ]] && exit 0
     exit 1
     ;;
