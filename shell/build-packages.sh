@@ -20,14 +20,14 @@ format.duration() {
 # Named filter groups. Edit to add your own.
 case "$1" in
   all) filter() {      grep -vE -- 'broken/'; } ;;
-  git) filter() {      grep -vE -- 'broken/|chromium|llama|gguf|nvidia|cuda|linux-tachyon' | grep -E -- '-git|-hg'; } ;;
-  linux) filter() {    grep -vE -- 'broken/|chromium|llama|gguf|nvidia|cuda'               | grep -E -- 'linux-tachyon'; } ;;
-  llama) filter() {    grep -vE -- 'broken/|nvidia|cuda|linux-tachyon'                     | grep -E -- 'llama|gguf'; } ;;
-  nvidia) filter() {   grep -vE -- 'broken/|llama|gguf|linux-tachyon'                      | grep -E -- 'nvidia|cuda'; } ;;
-  chromium) filter() { grep -vE -- 'broken/|llama|gguf|nvidia|cuda|linux-tachyon'          | grep -E -- 'chromium'; } ;;
-  custom) filter() {   grep -vE -- 'broken/|chromium|llama|gguf|nvidia|cuda|linux-tachyon' | grep -E -- 'custom/'; } ;;
-  others) filter() {   grep -vE -- 'broken/|chromium|llama|gguf|nvidia|cuda|linux-tachyon' | grep -E -- 'others/'; } ;;
-  mine) filter() {     grep -vE -- 'broken/|chromium|llama|gguf|nvidia|cuda|linux-tachyon' | grep -E -- 'mine/'; } ;;
+  git) filter() {      grep -vE -- 'broken/|chromium|llama.cpp-vulkan|llama.cpp-cuda|gguf|nvidia|cuda|linux-tachyon' | grep -E -- '-git|-hg'; } ;;
+  linux) filter() {    grep -vE -- 'broken/|chromium|llama.cpp-vulkan|llama.cpp-cuda|gguf|nvidia|cuda'               | grep -E -- 'linux-tachyon'; } ;;
+  llama) filter() {    grep -vE -- 'broken/|chromium|nvidia|cuda|linux-tachyon' | sort -r                            | grep -E -- 'llama.cpp-vulkan|llama.cpp-cuda|gguf'; } ;;
+  nvidia) filter() {   grep -vE -- 'broken/|chromium|llama.cpp-vulkan|gguf|linux-tachyon'                            | grep -E -- 'nvidia|cuda'; } ;;
+  chromium) filter() { grep -vE -- 'broken/|llama.cpp-vulkan|llama.cpp-cuda|gguf|nvidia|cuda|linux-tachyon'          | grep -E -- 'chromium'; } ;;
+  custom) filter() {   grep -vE -- 'broken/|chromium|llama.cpp-vulkan|llama.cpp-cuda|gguf|nvidia|cuda|linux-tachyon' | grep -E -- 'custom/'; } ;;
+  others) filter() {   grep -vE -- 'broken/|chromium|llama.cpp-vulkan|llama.cpp-cuda|gguf|nvidia|cuda|linux-tachyon' | grep -E -- 'others/'; } ;;
+  mine) filter() {     grep -vE -- 'broken/|chromium|llama.cpp-vulkan|llama.cpp-cuda|gguf|nvidia|cuda|linux-tachyon' | grep -E -- 'mine/'; } ;;
   *)
     echo "usage: $0 <group>"
     echo "groups: all, git, linux llama, nvidia, chromium, custom, others, mine"
