@@ -19,7 +19,7 @@ format.duration() {
 
 # Named filter groups. Edit to add your own.
 case "$1" in
-  all) filter() {      grep -vE -- 'broken/|-git|-hg|'; } ;;
+  all) filter() {      grep -vE -- 'broken/|chromium|-git|-hg'; } ;;
   git) filter() {      grep -vE -- 'broken/|chromium|llama.cpp-vulkan|llama.cpp-cuda|gguf|nvidia|cuda|linux-tachyon' | grep -E -- '-git|-hg'; } ;;
   linux) filter() {    grep -vE -- 'broken/|chromium|llama.cpp-vulkan|llama.cpp-cuda|gguf|nvidia|cuda'               | grep -E -- 'linux-tachyon'; } ;;
   llama) filter() {    grep -vE -- 'broken/|chromium|nvidia|cuda|linux-tachyon' | sort -r                            | grep -E -- 'llama.cpp-vulkan|llama.cpp-cuda|gguf'; } ;;
