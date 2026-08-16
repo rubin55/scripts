@@ -33,15 +33,15 @@ filter() {
 filter.group() {
   case "$1" in
     all)      grep -vE -- 'broken/' ;;
-    regular)  grep -vE -- 'broken/|chromium|linux-tachyon|-git|-hg' ;;
-    devel)    grep -vE -- 'broken/|chromium|llama.cpp-vulkan|llama.cpp-cuda|gguf|nvidia|cuda|linux-tachyon' | grep -E -- '-git|-hg' ;;
-    linux)    grep -vE -- 'broken/|chromium|llama.cpp-vulkan|llama.cpp-cuda|gguf|nvidia|cuda'               | grep -E -- 'linux-tachyon' ;;
-    llama)    grep -vE -- 'broken/|chromium|nvidia|cuda|linux-tachyon' | sort -r                            | grep -E -- 'llama.cpp-vulkan|llama.cpp-cuda|gguf' ;;
-    nvidia)   grep -vE -- 'broken/|chromium|llama.cpp-vulkan|gguf|linux-tachyon'                            | grep -E -- 'nvidia|cuda' ;;
-    chromium) grep -vE -- 'broken/|llama.cpp-vulkan|llama.cpp-cuda|gguf|nvidia|cuda|linux-tachyon'          | grep -E -- 'chromium' ;;
-    custom)   grep -vE -- 'broken/|chromium|llama.cpp-vulkan|llama.cpp-cuda|gguf|nvidia|cuda|linux-tachyon' | grep -E -- 'custom/' ;;
-    others)   grep -vE -- 'broken/|chromium|llama.cpp-vulkan|llama.cpp-cuda|gguf|nvidia|cuda|linux-tachyon' | grep -E -- 'others/' ;;
-    mine)     grep -vE -- 'broken/|chromium|llama.cpp-vulkan|llama.cpp-cuda|gguf|nvidia|cuda|linux-tachyon' | grep -E -- 'mine/' ;;
+    regular)  grep -vE -- 'broken/|chromium|linux-tachyon|sunshine|-git|-hg' ;;
+    devel)    grep -vE -- 'broken/|chromium|llama.cpp-vulkan|llama.cpp-cuda|gguf|nvidia|cuda|linux-tachyon|sunshine' | grep -E -- '-git|-hg' ;;
+    linux)    grep -vE -- 'broken/|chromium|llama.cpp-vulkan|llama.cpp-cuda|gguf|nvidia|cuda|sunshine'               | grep -E -- 'linux-tachyon' ;;
+    llama)    grep -vE -- 'broken/|chromium|nvidia|cuda|linux-tachyon|sunshine' | sort -r                            | grep -E -- 'llama.cpp-vulkan|llama.cpp-cuda|gguf' ;;
+    nvidia)   grep -vE -- 'broken/|chromium|llama.cpp-vulkan|gguf|linux-tachyon'                                     | grep -E -- 'nvidia|cuda|sunshine' ;;
+    chromium) grep -vE -- 'broken/|llama.cpp-vulkan|llama.cpp-cuda|gguf|nvidia|cuda|linux-tachyon|sunshine'          | grep -E -- 'chromium' ;;
+    custom)   grep -vE -- 'broken/|chromium|llama.cpp-vulkan|llama.cpp-cuda|gguf|nvidia|cuda|linux-tachyon|sunshine' | grep -E -- 'custom/' ;;
+    others)   grep -vE -- 'broken/|chromium|llama.cpp-vulkan|llama.cpp-cuda|gguf|nvidia|cuda|linux-tachyon|sunshine' | grep -E -- 'others/' ;;
+    mine)     grep -vE -- 'broken/|chromium|llama.cpp-vulkan|llama.cpp-cuda|gguf|nvidia|cuda|linux-tachyon|sunshine' | grep -E -- 'mine/' ;;
   esac
 }
 
