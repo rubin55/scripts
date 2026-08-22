@@ -36,8 +36,8 @@ done
 
 # Ensure links exist to my skills location for various agents.
 for skill_dir in "${skill_dirs[@]}"; do
-  if [[ -d "$HOME/$skill_dir" && ! -L "$HOME/$skill_dir" ]]; then
-    rmdir "$HOME/$skill_dir"
-  fi
-  ln -sfnv "$my_skills" "$HOME/$skill_dir"
+  target="$HOME/$skill_dir"
+  [[ -d "$(dirname "$target")" ]] || continue
+  [[ -d "$target" && ! -L "$target" ]] && rmdir "$target"
+  ln -sfnv "$my_skills" "$target"
 done
