@@ -1,0 +1,73 @@
+From 9bc79c71f03c26e01b80ab340bca7dd193c9eb45 Mon Sep 17 00:00:00 2001
+From: Rubin Simons <me@rubin55.org>
+Date: Mon, 3 Aug 2026 17:02:24 +0200
+Subject: [PATCH] Do enumerate skills in the system prompt when their
+ permission is ask
+
+---
+ CHANGELOG.md                    |  3 +++
+ src/skill-prompt-sanitizer.ts   | 11 ++++++-----
+ tests/permission-system.test.ts |  6 +++---
+ 3 files changed, 12 insertions(+), 8 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 0cbf034..a4b647c 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++### Fixed
++- Kept `ask` skills advertised in the system prompt instead of hiding them, matching the documented behavior that only denied skills are hidden. Loading an advertised `ask` skill continues to require interactive confirmation via the read-path check.
++
+ ## [0.8.0] - 2026-07-03
+ 
+ ### Changed
+diff --git a/src/skill-prompt-sanitizer.ts b/src/skill-prompt-sanitizer.ts
+index dc0f4c8..7b484db 100644
+--- a/src/skill-prompt-sanitizer.ts
++++ b/src/skill-prompt-sanitizer.ts
+@@ -240,12 +240,13 @@ export function resolveSkillPromptEntries(
+     });
+     enforcementEntries.push(...resolvedEntries);
+ 
+-    // The system prompt is an advertised capability list, so only fully allowed
+-    // skills should be visible. Ask/deny skills remain tracked for read-path
+-    // enforcement but are hidden to avoid context pollution.
+-    const visibleSectionEntries = resolvedEntries.filter((entry) => entry.state === "allow");
++    // The system prompt is an advertised capability list. Denied skills are
++    // hidden and stay tracked for read-path enforcement. Ask skills remain
++    // advertised so the model can discover them; loading one triggers the
++    // interactive confirmation in the read-path check.
++    const visibleSectionEntries = resolvedEntries.filter((entry) => entry.state !== "deny");
+     for (const entry of resolvedEntries) {
+-      if (entry.state !== "allow") {
++      if (entry.state === "deny") {
+         hiddenSkillNames.add(entry.name);
+       }
+     }
+diff --git a/tests/permission-system.test.ts b/tests/permission-system.test.ts
+index e0991e4..6beff2b 100644
+--- a/tests/permission-system.test.ts
++++ b/tests/permission-system.test.ts
+@@ -2382,7 +2382,7 @@ runTest("REGRESSION: resolveSkillPromptEntries sanitizes every available_skills
+   }
+ });
+ 
+-runTest("resolveSkillPromptEntries hides ask skills from the system prompt", () => {
++runTest("resolveSkillPromptEntries keeps ask skills advertised in the system prompt", () => {
+   const { manager, cleanup } = createManager({
+     defaultPolicy: { tools: "ask", bash: "ask", mcp: "ask", skills: "ask", special: "ask" },
+     skills: {},
+@@ -2403,8 +2403,8 @@ runTest("resolveSkillPromptEntries hides ask skills from the system prompt", ()
+ 
+     const result = resolveSkillPromptEntries(prompt, manager, null, "/cwd");
+ 
+-    assert.equal(result.prompt.includes("unlisted-skill"), false, "Ask/unlisted skills should not be advertised");
+-    assert.equal(result.prompt.includes("<available_skills>"), false, "Empty skill blocks should be removed");
++    assert.equal(result.prompt.includes("unlisted-skill"), true, "Ask skills should stay advertised so the model can discover them");
++    assert.equal(result.prompt.includes("<available_skills>"), true, "Blocks containing ask skills should be kept");
+     assert.deepEqual(
+       result.entries.map((entry) => `${entry.name}:${entry.state}`),
+       ["unlisted-skill:ask"],
