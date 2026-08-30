@@ -4,7 +4,7 @@
 Commands:
 
   table   group equivalent models across providers, print prices
-  probe   sample neuralwatt energy billing, write price overrides
+  usage   price neuralwatt energy billing from your own traffic
   scores  fetch artificial analysis intelligence scores
 
 table is used when no command is given. Each takes --help.
@@ -19,17 +19,17 @@ import re
 import statistics
 import subprocess
 import sys
-import time
 import urllib.error
+import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 REPORT_DATA = Path.home() / ".pi/report-data"
 DEFAULT_CONFIG = Path.home() / ".pi/agent/models.json"
 DEFAULT_CACHE = Path.home() / ".pi/model-doctor/models-cache.json"
-DEFAULT_OVERRIDES = REPORT_DATA / "price-overrides.json"
 DEFAULT_SCORES = REPORT_DATA / "aa-scores.json"
+DEFAULT_USAGE = REPORT_DATA / "neuralwatt-usage.json"
 
 
 def read_providers(path):
@@ -52,8 +52,350 @@ def fmt_price(value):
     return f"{value:.3f}".rstrip("0").rstrip(".")
 
 
+def fmt_cell(value):
+    """Three significant digits, five characters at most."""
+    if 0 < value < 0.0005:
+        return "<.001"
+    if value >= 100:
+        return f"{value:.0f}"
+    if value >= 10:
+        text = f"{value:.1f}"
+    elif value >= 1:
+        text = f"{value:.2f}"
+    else:
+        text = f"{value:.3f}"
+    return text.rstrip("0").rstrip(".")
+
+
 def fmt_score(value):
     return f"{value:.0f}" if value else "-"
+
+
+# --- usage ---------------------------------------------------------
+
+USAGE_DOC = """Derive neuralwatt's token prices from your own traffic.
+
+Neuralwatt bills the GPU energy a request draws, at one rate per kWh
+for every model, instead of a per-token rate. Which of the two you
+pay is an account setting, so there is no per-request ceiling at the
+token price.
+
+Energy per request is not a property of the request alone. The meter
+reads the whole server and attributes a share of it from the tokens
+in flight, bounded by a cap, so the same request draws far more on a
+quiet server than under load. 
+
+The per-request usage API lists every request you made with its token
+split and its measured energy. --refresh pulls it into a cache file,
+merging on request id so the history grows past the 30 days the API
+serves, and the prices are then worked out from the cache alone. The
+fit is
+
+    cost = input_rate * input_tokens + output_rate * output_tokens
+
+Requests are grouped into prompt-size bands, the same way neuralwatt
+aggregates its own published figures, and each band is reduced to its
+median request, which keeps one unlucky request from setting the
+price. The fit gives the ratio between the two rates; both are then
+scaled so that they reproduce what you were actually billed over the
+window. There is no constant term: the whole spend is attributed to
+tokens, which is what a price per million tokens means.
+
+Input counts fresh prompt tokens only, since cached tokens skip most
+of the prefill work, so the rates compare against the input and
+output prices other providers list.
+
+Each row also says what it was charged, so the per kWh rate is read
+from the data also. Credit bought before a price change drains first, 
+so the prices follow whatever your credit actually costs: top up at
+a new rate and the next run reflects it.
+"""
+
+PROVIDER = "neuralwatt"
+
+# Prompt sizes that split requests into bands, in tokens.
+BANDS = [0, 500, 2000, 8000, 32000]
+
+# Requests a model needs before it is priced, and a band before it
+# counts towards the fit.
+MIN_REQUESTS = 20
+MIN_ROWS = 3
+
+
+def api_key(provider):
+    """Read the provider key from pi."""
+    out = subprocess.run(["pi", "auth", "print-api-key", "--provider", provider],
+                         capture_output=True, text=True, check=False)
+    if out.returncode != 0 or not out.stdout.strip():
+        sys.exit(f"could not get an api key for {provider}")
+    return out.stdout.strip().splitlines()[-1]
+
+
+def load_models(config, provider):
+    """Return the base url and {model id: (input, output) price}."""
+    entry = read_providers(config)[provider]
+    models = {}
+    for model in entry.get("models", []):
+        cost = model.get("cost") or {}
+        models[model["id"]] = (cost.get("input", 0.0), cost.get("output", 0.0))
+    return entry["baseUrl"], models
+
+
+def fetch_usage(base_url, key, days, timeout):
+    """Return the request rows in the window and how they were billed."""
+    # The api rejects a window over 30 days, so pin both ends of it.
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=days)
+    query = (f"limit=200&start_date={start:%Y-%m-%dT%H:%M:%SZ}"
+             f"&end_date={end:%Y-%m-%dT%H:%M:%SZ}")
+    rows, cursor, accounting = [], None, None
+    while True:
+        url = f"{base_url}/usage/requests?{query}"
+        if cursor:
+            url += "&cursor=" + urllib.parse.quote(cursor, safe="")
+        request = urllib.request.Request(
+            url, headers={"Authorization": f"Bearer {key}"})
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.load(response)
+        rows += payload.get("requests", [])
+        accounting = accounting or payload.get("accounting_method")
+        cursor = payload.get("next_cursor")
+        if not cursor:
+            return rows, accounting
+
+
+def billed_rate(requests):
+    """The USD per kWh the rows worked out at, or None.
+
+    The same figure the dashboard export reports as
+    energy_rate_applied: what was charged over the energy that was
+    drawn. Credit bought before a price change drains first. It reads
+    lower where a discount applied on the flex tier or where surge
+    protection capped a request that drew more energy than expected.
+    """
+    spent = sum(e["usd"] for e in requests)
+    energy = sum(e["kwh"] for e in requests if e["usd"])
+    return spent / energy if spent and energy else None
+
+
+def by_model(rows):
+    """Group the usable rows per model."""
+    models = {}
+    for row in rows:
+        name = row.get("requested_model") or row.get("model")
+        if not name or not row.get("energy_kwh"):
+            continue
+        cached = row.get("cached_tokens") or 0
+        models.setdefault(name, []).append({
+            "prompt": row["prompt_tokens"],
+            "cached": cached,
+            # Cached tokens skip the prefill, so they are not input.
+            "input": row["prompt_tokens"] - cached,
+            "output": row["completion_tokens"],
+            "kwh": row["energy_kwh"],
+            "usd": row.get("cost_usd") or 0.0,
+        })
+    return models
+
+
+def aggregate(requests):
+    """Reduce each prompt-size band to its median request.
+
+    Energy attribution swings by two orders of magnitude between
+    identical requests, depending on how busy the server was, and the
+    high side is a long tail. The median of a band is a much steadier
+    estimate of a typical request than its mean.
+    """
+    bands = {}
+    for entry in requests:
+        edges = [e for e in BANDS if e <= entry["prompt"]]
+        bands.setdefault(edges[-1], []).append(entry)
+
+    points = [{"input": statistics.median(e["input"] for e in group),
+               "output": statistics.median(e["output"] for e in group),
+               "cost": statistics.median(e["cost"] for e in group),
+               "band": band,
+               "requests": len(group)}
+              for band, group in sorted(bands.items())]
+    # Thin bands are noise. Keep them only if nothing else is left.
+    return [p for p in points if p["requests"] >= MIN_ROWS] or points
+
+
+def fit_rates(points):
+    """Fit cost = a * input + b * output over the bands.
+
+    Each band is divided by its token count first, so long and short
+    requests count the same. That turns the fit into a line through
+    the per-token cost against the input share, which needs the bands
+    to cover a range of prompt sizes. Returns None when they do not,
+    or when the fit puts a rate below zero.
+    """
+    sii = sio = soo = sic = soc = 0.0
+    for p in points:
+        tokens = p["input"] + p["output"]
+        if not tokens:
+            continue
+        x, y, cost = p["input"] / tokens, p["output"] / tokens, p["cost"] / tokens
+        sii += x * x
+        sio += x * y
+        soo += y * y
+        sic += x * cost
+        soc += y * cost
+
+    det = sii * soo - sio * sio
+    if det <= 1e-12:
+        return None
+    a = (soo * sic - sio * soc) / det
+    b = (sii * soc - sio * sic) / det
+    return (a, b) if a >= 0 and b >= 0 else None
+
+
+def analyse(requests, prices):
+    """Fit the two rates and summarise the window."""
+    listed_in, listed_out = prices
+    # What was charged, not energy times a rate: a discounted or
+    # surge-capped request cost less than its energy suggests.
+    for entry in requests:
+        entry["cost"] = entry["usd"]
+    points = aggregate(requests)
+    rates, method = fit_rates(points), "fit"
+    if rates is None and (listed_in or listed_out):
+        # The traffic cannot tell input from output, so keep the
+        # ratio the provider lists and let the spend set the level.
+        rates, method = (listed_in / 1e6, listed_out / 1e6), "listed ratio"
+    elif rates is None:
+        rates, method = (1e-6, 1e-6), "flat"
+    rate_in, rate_out = rates
+
+    spent = sum(e["cost"] for e in requests)
+    shaped = sum(rate_in * e["input"] + rate_out * e["output"] for e in requests)
+    # The bands give the ratio between the two rates, the window's own
+    # spend gives their level: above 1 means the median request sat
+    # under the average one.
+    scale = spent / shaped if shaped else 0.0
+    rate_in, rate_out = rate_in * scale, rate_out * scale
+
+    tokens_in = sum(e["input"] for e in requests)
+    tokens_out = sum(e["output"] for e in requests)
+    prompt = sum(e["prompt"] for e in requests)
+    listed = (tokens_in * listed_in + tokens_out * listed_out) / 1e6
+
+    return {
+        "input": round(rate_in * 1e6, 6),
+        "output": round(rate_out * 1e6, 6),
+        "method": method,
+        "requests": len(requests),
+        "bands": len(points),
+        "level_scale": round(scale, 3),
+        "cached_share": round(sum(e["cached"] for e in requests) / prompt, 3)
+                        if prompt else None,
+        "vs_listed": round(spent / listed, 4) if listed else None,
+        "usd_per_mtok": round(spent / (tokens_in + tokens_out) * 1e6, 4),
+        "mwh_per_request": round(statistics.fmean(e["kwh"] * 1e6
+                                                  for e in requests), 2),
+        "usd_per_request": round(spent / len(requests), 6),
+        "billed_usd": round(spent, 6),
+        "usd_per_kwh": round(billed_rate(requests) or 0.0, 2),
+        "note": f"{method} over {len(requests)} requests in {len(points)} "
+                f"prompt-size band{'' if len(points) == 1 else 's'}, "
+                f"as billed",
+    }
+
+
+def refresh_cache(path, base_url, timeout):
+    """Pull the api into the cache file, keeping older rows.
+
+    The api only serves the last 30 days, so rows are merged on their
+    request id and the cache grows past that window over time.
+    """
+    key = api_key(PROVIDER)
+    try:
+        fetched, accounting = fetch_usage(base_url, key, 30, timeout)
+    except urllib.error.HTTPError as exc:
+        # A 404 from a good key means the endpoint is off for the account.
+        sys.exit(f"usage api returned {exc.code}: {exc.reason}")
+    except urllib.error.URLError as exc:
+        sys.exit(f"could not reach the usage api: {exc.reason}")
+
+    rows = {}
+    if path.exists():
+        for row in json.loads(path.read_text()).get("requests", []):
+            rows[row["request_id"]] = row
+    added = sum(1 for row in fetched if row["request_id"] not in rows)
+    for row in fetched:
+        rows[row["request_id"]] = row
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "fetched": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "accounting_method": accounting,
+        "requests": sorted(rows.values(), key=lambda r: r["created_at"],
+                           reverse=True),
+    }, indent=1) + "\n")
+    print(f"cached {len(rows)} requests in {path}, {added} new")
+
+
+def read_cache(path, days):
+    """Return the cached rows inside the window, and how they billed."""
+    if not path.exists():
+        sys.exit(f"no usage cache at {path}, run with --refresh")
+    data = json.loads(path.read_text())
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    rows = [row for row in data.get("requests", [])
+            if datetime.fromisoformat(row["created_at"]) >= since]
+    return rows, data.get("accounting_method")
+
+
+def price_models(path, days, prices):
+    """Price each model in prices from the cached requests.
+
+    Returns the per-model figures and a line describing the window,
+    or nothing when there is no cache, no energy billing, or no rate
+    to read out of it.
+    """
+    if not path.exists():
+        return None, None
+    rows, accounting = read_cache(path, days)
+    traffic = by_model(rows)
+
+    # cost_usd is the token cost on a token-billed account, so the
+    # ratio to energy is a rate only when the account bills energy.
+    if accounting != "energy":
+        return None, f"{len(rows)} requests over {days} days, billed by token"
+    rate = billed_rate([e for group in traffic.values() for e in group])
+    if not rate:
+        return None, f"{len(rows)} requests over {days} days, no rate to read"
+
+    results = {}
+    for model, listed in prices.items():
+        requests = traffic.get(model, [])
+        if len(requests) >= MIN_REQUESTS:
+            results[model] = analyse(requests, listed)
+    return results, (f"{len(rows)} requests over {days} days, "
+                     f"billed at {rate:.2f} USD/kWh")
+
+
+def cmd_usage(args):
+    base_url, models = load_models(args.config, PROVIDER)
+    if args.model:
+        models = {k: v for k, v in models.items() if k in args.model}
+    if not models:
+        sys.exit("no models matched")
+
+    if args.refresh or not args.requests.exists():
+        refresh_cache(args.requests, base_url, args.timeout)
+    results, window = price_models(args.requests, args.days, models)
+    if not results:
+        sys.exit(window or f"no model had {MIN_REQUESTS} requests to fit")
+
+    print(f"{window}\n")
+    for model, stats in results.items():
+        print(f"{model:18} in {stats['input']:7.4f}  out {stats['output']:7.4f}"
+              f"  n {stats['requests']:4}  {stats['cached_share']:5.0%} cached"
+              f"  {stats['method']}")
+    if args.verbose:
+        print()
+        print(json.dumps(results, indent=2))
 
 
 # --- table ---------------------------------------------------------
@@ -63,10 +405,19 @@ TABLE_DOC = """Compare per-model prices across providers.
 Reads the pi model config plus the pi-model-doctor models.dev cache,
 groups equivalent models across providers, and prints a price table.
 All prices are US dollars per million tokens.
+
+Providers that bill energy instead of tokens are priced from the
+request cache the usage command keeps, marked with ~ in the table.
 """
 
 
 COLUMN_ORDER = ["orcarouter", "edenai", "cortecs", "neuralwatt", "hetzner"]
+
+# Column headers, kept short so the table fits in 80 columns.
+SHORT_NAMES = {"orcarouter": "orca", "edenai": "eden", "neuralwatt": "neural"}
+
+WIDTH = 80
+MIN_COLUMN = 7
 
 # Config key -> artificial analysis key, for names that differ.
 ALIASES = {}
@@ -101,24 +452,27 @@ def load_config(path):
                 "measured": False,
             })
     # Fixed column order, anything unlisted trails in config order.
-    rank = {p: i for i, p in enumerate(COLUMN_ORDER)}
-    return rows, sorted(providers, key=lambda p: rank.get(p, len(rank)))
+    order = {p: i for i, p in enumerate(COLUMN_ORDER)}
+    return rows, sorted(providers, key=lambda p: order.get(p, len(order)))
 
 
-def apply_overrides(rows, path):
-    """Swap listed prices for measured effective rates where known."""
-    if not path or not path.exists():
+def apply_measured(rows, cache, days):
+    """Swap listed prices for the rates measured from cached usage."""
+    listed = {row["id"]: (row["input"], row["output"])
+              for row in rows if row["provider"] == PROVIDER}
+    if not listed:
         return None
-    data = json.loads(path.read_text())
-    by_provider = data.get("providers", {})
+    measured, window = price_models(cache, days, listed)
+    if not measured:
+        return None
     for row in rows:
-        entry = by_provider.get(row["provider"], {}).get(row["id"])
-        if not entry:
+        stats = measured.get(row["id"]) if row["provider"] == PROVIDER else None
+        if not stats:
             continue
-        row["input"] = entry.get("input", row["input"])
-        row["output"] = entry.get("output", row["output"])
+        row["input"] = stats["input"]
+        row["output"] = stats["output"]
         row["measured"] = True
-    return data
+    return window
 
 
 def load_names(path, providers):
@@ -184,91 +538,129 @@ def group(rows, names, weight, count_free):
     return result
 
 
-def print_table(groups, providers, weight, overrides):
+def cell_text(row):
+    """The price cell for one provider, without colour."""
+    if row is None:
+        return "-"
+    if not priced(row):
+        return "free?"
+    text = fmt_cell(row["blended"])
+    if row["measured"]:
+        text += "~"
+    if row["tiered"]:
+        text += "+"
+    return text
+
+
+def measure_table(groups, providers, tail):
+    """Work out the column headers, cells and widths.
+
+    Names take whatever the fixed columns leave of the 80.
+    """
+    heads = [(SHORT_NAMES.get(p) or p)[:MIN_COLUMN] for p in providers]
+    cells = {}
+    for grp in groups:
+        by_provider = {r["provider"]: r for r in grp["entries"]}
+        for provider in providers:
+            cells[grp["key"], provider] = cell_text(by_provider.get(provider))
+
+    widths = [max(MIN_COLUMN, *(len(cells[g["key"], p]) for g in groups))
+              for p in providers]
+    room = WIDTH - sum(w + 1 for w in widths) - tail
+    name_width = min(max(len("model"), *(len(g["name"]) for g in groups)), room)
+    return heads, cells, widths, name_width
+
+
+def print_table(groups, providers, weight, window):
     """Render the comparison table, one row per model."""
-    name_width = max(len("model"), *(len(g["name"]) for g in groups))
-    widths = [max(len(p), 8) for p in providers]
     scored = any(g["intel"] is not None for g in groups)
     coded = any(g["code"] is not None for g in groups)
+    tail = 6 + (6 if scored else 0) + (6 if coded else 0)
+    heads, cells, widths, name_width = measure_table(groups, providers, tail)
 
     header = "model".ljust(name_width)
-    for provider, width in zip(providers, widths):
-        header += "  " + provider.rjust(width)
+    for head, width in zip(heads, widths, strict=True):
+        header += " " + head.rjust(width)
     header += "  save"
     if scored:
-        header += "  intel"
+        header += " intel"
     if coded:
-        header += "   code"
+        header += "  code"
     print(header)
     print("-" * len(header))
 
     for grp in groups:
-        line = grp["name"].ljust(name_width)
+        line = grp["name"][:name_width].ljust(name_width)
         by_provider = {r["provider"]: r for r in grp["entries"]}
-        for provider, width in zip(providers, widths):
+        for provider, width in zip(providers, widths, strict=True):
             row = by_provider.get(provider)
-            if row is None:
-                cell = "-"
-            elif not priced(row):
-                cell = "free?"
-            else:
-                cell = fmt_price(row["blended"])
-                if row["measured"]:
-                    cell += "~"
-                if row["tiered"]:
-                    cell += "+"
-            cell = cell.rjust(width)
+            cell = cells[grp["key"], provider].rjust(width)
             if row is grp["best"]:
                 cell = paint(cell, GREEN)
             elif row is grp["worst"]:
                 cell = paint(cell, RED)
-            line += "  " + cell
+            line += " " + cell
         line += "  " + (f"{grp['save']:.0%}" if grp["save"] > 0 else "-").rjust(4)
         if scored:
-            line += f"  {fmt_score(grp['intel']):>5}"
+            line += f"{fmt_score(grp['intel']):>6}"
         if coded:
-            line += f"  {fmt_score(grp['code']):>5}"
+            line += f"{fmt_score(grp['code']):>6}"
         print(line)
 
+    print_legend(zip(heads, providers, strict=True), weight, window,
+                 scored, coded)
+
+
+def print_legend(columns, weight, window, scored, coded):
+    """Explain the marks under the table."""
     print()
     print(f"USD per million tokens, blended at {weight}:1 input:output.")
-    print(f"{paint('cheapest', GREEN)}     {paint('most expensive', RED)}"
-          "     + has tiered pricing above a context threshold")
-    print("free?        no pricing in the catalog, excluded from cheapest")
+    print(f"{paint('cheapest', GREEN)}  {paint('most expensive', RED)}"
+          "  + tiered above a context threshold")
+    print("free?  no pricing in the catalog, excluded from cheapest")
     if scored:
         label = "intel, code" if coded else "intel"
-        print(f"{label:12} artificial analysis index scores, from "
+        print(f"{label}  artificial analysis index, "
               "https://artificialanalysis.ai/")
-    if overrides:
-        print(f"~            measured effective rate, not the listed price "
-              f"({overrides.get('tariff_source', 'see overrides file')})")
+    if window:
+        print("~  rate measured from your own traffic, not the listed price")
+        print(f"   {window}")
+    shortened = [f"{head}={provider}"
+                 for head, provider in columns if head != provider]
+    if shortened:
+        print("columns: " + ", ".join(shortened))
 
 
 def print_details(groups):
     """Print per-model context, output ceiling and reasoning support."""
+    print("\nlisted input and output price, context, output ceiling")
     for grp in sorted(groups, key=lambda g: g["key"]):
-        print(f"\n{grp['name']}")
+        print(f"\n{grp['name'][:WIDTH]}")
         for row in sorted(grp["entries"], key=lambda r: r["blended"]):
             ctx = f"{row['context'] / 1000:.0f}K" if row["context"] else "?"
             out = f"{row['max_tokens'] / 1000:.0f}K" if row["max_tokens"] else "?"
-            think = "reasoning" if row["reasoning"] else "-"
-            print(f"  {row['provider']:12} {row['id']:28} "
-                  f"in {fmt_price(row['input']):>7}  out {fmt_price(row['output']):>7}  "
-                  f"ctx {ctx:>7}  max {out:>6}  {think}")
+            think = "reason" if row["reasoning"] else "-"
+            # Keep the tail of a long id, the vendor prefix repeats.
+            model_id = row["id"] if len(row["id"]) <= 27 else row["id"][-27:]
+            print(f"  {row['provider']:11}{model_id:28}"
+                  f"{fmt_price(row['input']):>7}{fmt_price(row['output']):>8}"
+                  f"{ctx:>7}{out:>6}{think:>7}")
 
 
 def write_csv(groups, stream):
     writer = csv.writer(stream)
     writer.writerow(["model", "provider", "id", "input", "output",
                      "cache_read", "blended", "context", "max_tokens",
-                     "reasoning", "tiered", "cheapest", "intel", "code"])
+                     "reasoning", "tiered", "measured", "cheapest",
+                     "intel", "code"])
     for grp in groups:
         for row in grp["entries"]:
             writer.writerow([grp["name"], row["provider"], row["id"],
                              row["input"], row["output"], row["cache_read"],
                              round(row["blended"], 4), row["context"],
                              row["max_tokens"], row["reasoning"], row["tiered"],
-                             row is grp["best"], grp["intel"], grp["code"]])
+                             row["measured"], row is grp["best"],
+                             grp["intel"], grp["code"]])
 
 
 def cmd_table(args):
@@ -282,9 +674,9 @@ def cmd_table(args):
     if not rows:
         sys.exit("no models matched")
 
-    overrides = None
-    if not args.no_overrides:
-        overrides = apply_overrides(rows, args.overrides)
+    window = None
+    if not args.listed:
+        window = apply_measured(rows, args.requests, args.days)
 
     names = load_names(args.cache, providers)
     groups = group(rows, names, args.blend, args.count_free)
@@ -306,7 +698,7 @@ def cmd_table(args):
     if args.csv:
         write_csv(groups, sys.stdout)
         return
-    print_table(groups, providers, args.blend, overrides)
+    print_table(groups, providers, args.blend, window)
     if args.details:
         print_details(groups)
 
@@ -381,164 +773,6 @@ def cmd_scores(args):
             print(f"  {model_key:24} {model_id}")
 
 
-# --- probe ---------------------------------------------------------
-
-PROBE_DOC = """Measure neuralwatt's effective token price under energy billing.
-
-Neuralwatt charges the lesser of an energy tariff and a ceiling set
-at a multiple of the advertised token price:
-
-    cost = min(tariff * energy_kWh, cap_multiple * token_price)
-
-Energy drawn per request varies a lot, because attribution is
-prorated across a shared GPU pool, so the effective rate has to be
-sampled rather than calculated. This sends a few requests per model,
-recomputes what each would cost at the chosen tariff, and writes an
-overrides file that the table command reads.
-
-Samples are billed at whatever rate your current credit was bought
-at, which was 5.00 USD/kWh. The reported figures use --tariff
-instead, so they project the rate you pay on your next top-up.
-"""
-
-PROVIDER = "neuralwatt"
-PROMPT = "Explain what a hash map is, in one paragraph."
-FILLER = ("Context follows. A hash table stores keys in buckets chosen by a "
-          "hash function, and resolves collisions by probing or chaining. ")
-
-
-def build_prompt(prompt_tokens):
-    """Pad the prompt to roughly the requested input size."""
-    if not prompt_tokens:
-        return PROMPT
-    # Rough but steady across these tokenisers: four chars per token.
-    repeats = max(0, (prompt_tokens * 4 - len(PROMPT)) // len(FILLER))
-    return FILLER * repeats + PROMPT
-
-
-def api_key(provider):
-    """Read the provider key from pi rather than the environment."""
-    out = subprocess.run(["pi", "auth", "print-api-key", "--provider", provider],
-                         capture_output=True, text=True)
-    if out.returncode != 0 or not out.stdout.strip():
-        sys.exit(f"could not get an api key for {provider}")
-    return out.stdout.strip().splitlines()[-1]
-
-
-def load_models(config, provider):
-    """Return the base url and {model id: (input, output) price}."""
-    entry = read_providers(config)[provider]
-    models = {}
-    for model in entry.get("models", []):
-        cost = model.get("cost") or {}
-        models[model["id"]] = (cost.get("input", 0.0), cost.get("output", 0.0))
-    return entry["baseUrl"], models
-
-
-def sample(base_url, key, model, cap_tokens, timeout, prompt):
-    """Send one request and pull out tokens, energy and charge."""
-    body = json.dumps({"model": model, "max_tokens": cap_tokens,
-                       "messages": [{"role": "user", "content": prompt}]}).encode()
-    request = urllib.request.Request(f"{base_url}/chat/completions", data=body,
-                                     headers={"Authorization": f"Bearer {key}",
-                                              "Content-Type": "application/json"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        payload = json.load(response)
-    usage = payload["usage"]
-    return {"input": usage["prompt_tokens"], "output": usage["completion_tokens"],
-            "kwh": (payload.get("energy") or {}).get("energy_kwh"),
-            "usd": payload["cost"]["request_cost_usd"]}
-
-
-def analyse(samples, prices, tariff, cap_multiple):
-    """Recost the samples at the given tariff and summarise."""
-    listed_in, listed_out = prices
-    tokens_in = sum(s["input"] for s in samples)
-    tokens_out = sum(s["output"] for s in samples)
-    listed_total = (tokens_in * listed_in + tokens_out * listed_out) / 1e6
-
-    projected, capped = [], 0
-    for s in samples:
-        cap = cap_multiple * (s["input"] * listed_in + s["output"] * listed_out) / 1e6
-        energy_cost = tariff * s["kwh"] if s["kwh"] is not None else cap
-        if energy_cost >= cap - 1e-12:
-            capped += 1
-        projected.append(min(energy_cost, cap))
-
-    total = sum(projected)
-    scale = total / listed_total if listed_total else 0.0
-    per_mtok = [p / (s["input"] + s["output"]) * 1e6
-                for p, s in zip(projected, samples)]
-    energies = [s["kwh"] * 1e6 for s in samples if s["kwh"] is not None]
-
-    return {
-        "input": round(listed_in * scale, 6),
-        "output": round(listed_out * scale, 6),
-        "scale": round(scale, 4),
-        "samples": len(samples),
-        "capped": capped,
-        "usd_per_mtok_mean": round(statistics.fmean(per_mtok), 4),
-        "usd_per_mtok_min": round(min(per_mtok), 4),
-        "usd_per_mtok_max": round(max(per_mtok), 4),
-        "mwh_per_request": round(statistics.fmean(energies), 2) if energies else None,
-        "usd_per_request": round(total / len(samples), 6),
-        "billed_usd": round(sum(s["usd"] for s in samples), 6),
-        "note": f"measured {datetime.now(timezone.utc):%Y-%m-%d}, "
-                f"{capped}/{len(samples)} requests hit the price ceiling",
-    }
-
-
-def cmd_probe(args):
-    base_url, models = load_models(args.config, PROVIDER)
-    if args.model:
-        models = {k: v for k, v in models.items() if k in args.model}
-    if not models:
-        sys.exit("no models matched")
-    key = api_key(PROVIDER)
-    prompt = build_prompt(args.prompt_tokens)
-
-    print(f"tariff {args.tariff} USD/kWh, "
-          f"ceiling at {args.cap_multiple}x token price\n")
-
-    results, billed = {}, 0.0
-    for model, prices in models.items():
-        samples = []
-        for i in range(args.samples):
-            try:
-                samples.append(sample(base_url, key, model, args.max_tokens,
-                                      args.timeout, prompt))
-            except (urllib.error.URLError, ValueError, KeyError) as exc:
-                print(f"  {model} sample {i + 1} failed: {exc}", file=sys.stderr)
-                continue
-            time.sleep(0.4)
-        if not samples:
-            print(f"{model:22} no usable samples", file=sys.stderr)
-            continue
-        stats = analyse(samples, prices, args.tariff, args.cap_multiple)
-        results[model] = stats
-        billed += stats["billed_usd"]
-        print(f"{model:22} {stats['usd_per_mtok_mean']:8.4f} usd/Mtok  "
-              f"{stats['mwh_per_request'] or 0:8.2f} mWh/req  "
-              f"{stats['usd_per_request']:9.6f} usd/req  "
-              f"{stats['scale']:5.2f}x listed  {stats['capped']}/{stats['samples']} capped")
-
-    print(f"\nbilled {billed:.6f} usd for this run at your existing credit rate")
-    if args.dry_run:
-        return
-
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    payload = {}
-    if args.out.exists():
-        payload = json.loads(args.out.read_text())
-    payload.setdefault("providers", {})[PROVIDER] = results
-    payload["generated"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    payload["tariff_source"] = f"{args.tariff} USD/kWh"
-    payload["cap_multiple"] = args.cap_multiple
-    payload["prompt_tokens"] = args.prompt_tokens
-    args.out.write_text(json.dumps(payload, indent=2) + "\n")
-    print(f"wrote {args.out}")
-
-
 # --- entry point ---------------------------------------------------
 
 def main():
@@ -556,16 +790,20 @@ def main():
     table.add_argument("--cache", type=Path, default=DEFAULT_CACHE,
                        help="model-doctor models.dev cache (default: %(default)s)")
     table.add_argument("--blend", type=float, default=3.0, metavar="N",
-                       help="input:output token ratio for blending (default: %(default)s)")
+                       help="input:output token ratio for blending "
+                            "(default: %(default)s)")
     table.add_argument("--sort", default="price",
                        choices=("price", "name", "save", "intel", "code"),
                        help="row order (default: %(default)s)")
     table.add_argument("--provider", action="append", metavar="ID",
                        help="limit to a provider, repeatable")
-    table.add_argument("--overrides", type=Path, default=DEFAULT_OVERRIDES,
-                       help="measured price overrides (default: %(default)s)")
-    table.add_argument("--no-overrides", action="store_true",
-                       help="ignore the overrides file and use listed prices")
+    table.add_argument("--requests", type=Path, default=DEFAULT_USAGE,
+                       help="neuralwatt request cache (default: %(default)s)")
+    table.add_argument("--days", type=int, default=30, metavar="N",
+                       help="window of cached requests to price from "
+                            "(default: %(default)s)")
+    table.add_argument("--listed", action="store_true",
+                       help="use listed prices, ignore measured ones")
     table.add_argument("--count-free", action="store_true",
                        help="let unpriced entries win the cheapest column")
     table.add_argument("--details", action="store_true",
@@ -585,28 +823,25 @@ def main():
                         help="scores file to write (default: %(default)s)")
     scores.add_argument("--timeout", type=int, default=60)
 
-    probe = commands.add_parser("probe", parents=[shared], help="measure neuralwatt prices",
-                                description=PROBE_DOC, formatter_class=plain)
-    probe.set_defaults(run=cmd_probe)
-    probe.add_argument("--out", type=Path, default=DEFAULT_OVERRIDES,
-                       help="overrides file to write (default: %(default)s)")
-    probe.add_argument("--samples", type=int, default=8, metavar="N",
-                       help="requests per model (default: %(default)s)")
-    probe.add_argument("--max-tokens", type=int, default=256)
-    probe.add_argument("--prompt-tokens", type=int, default=0, metavar="N",
-                       help="pad the prompt to roughly N input tokens")
-    probe.add_argument("--timeout", type=int, default=180)
-    probe.add_argument("--tariff", type=float, default=10.0, metavar="USD",
-                       help="energy price in USD per kWh (default: %(default)s)")
-    probe.add_argument("--cap-multiple", type=float, default=1.5, metavar="N",
-                       help="ceiling as a multiple of token price (default: %(default)s)")
-    probe.add_argument("--model", action="append", metavar="ID",
+    usage = commands.add_parser("usage", parents=[shared],
+                                help="price neuralwatt from your traffic",
+                                description=USAGE_DOC, formatter_class=plain)
+    usage.set_defaults(run=cmd_usage)
+    usage.add_argument("--requests", type=Path, default=DEFAULT_USAGE,
+                       help="request cache to read (default: %(default)s)")
+    usage.add_argument("--refresh", action="store_true",
+                       help="pull the usage api into the cache first")
+    usage.add_argument("--days", type=int, default=30, metavar="N",
+                       help="window of cached requests to use "
+                            "(default: %(default)s)")
+    usage.add_argument("--timeout", type=int, default=60)
+    usage.add_argument("--model", action="append", metavar="ID",
                        help="limit to a model, repeatable")
-    probe.add_argument("--dry-run", action="store_true",
-                       help="print results without writing the overrides file")
+    usage.add_argument("--verbose", action="store_true",
+                       help="also print the full figures per model")
 
     argv = sys.argv[1:]
-    if not argv or argv[0] not in ("table", "probe", "scores", "-h", "--help"):
+    if not argv or argv[0] not in ("table", "usage", "scores", "-h", "--help"):
         argv.insert(0, "table")
     args = parser.parse_args(argv)
     args.run(args)
