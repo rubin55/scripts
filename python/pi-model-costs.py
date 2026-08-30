@@ -5,13 +5,16 @@ Commands:
 
   table   group equivalent models across providers, print prices
   probe   sample neuralwatt energy billing, write price overrides
+  scores  fetch artificial analysis intelligence scores
 
-table is used when no command is given. Both take --help.
+table is used when no command is given. Each takes --help.
+Written data lives in ~/.pi/report-data.
 """
 
 import argparse
 import csv
 import json
+import os
 import re
 import statistics
 import subprocess
@@ -22,9 +25,11 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+REPORT_DATA = Path.home() / ".pi/report-data"
 DEFAULT_CONFIG = Path.home() / ".pi/agent/models.json"
 DEFAULT_CACHE = Path.home() / ".pi/model-doctor/models-cache.json"
-DEFAULT_OVERRIDES = Path.home() / ".pi/agent/price-overrides.json"
+DEFAULT_OVERRIDES = REPORT_DATA / "price-overrides.json"
+DEFAULT_SCORES = REPORT_DATA / "aa-scores.json"
 
 
 def read_providers(path):
@@ -32,8 +37,23 @@ def read_providers(path):
     return json.loads(path.read_text())["providers"]
 
 
+GREEN = "\033[32m"
+RED = "\033[31m"
+RESET = "\033[0m"
+COLOR = sys.stdout.isatty() and "NO_COLOR" not in os.environ
+
+
+def paint(text, colour):
+    """Wrap text in an ANSI colour, unless colour is turned off."""
+    return f"{colour}{text}{RESET}" if COLOR else text
+
+
 def fmt_price(value):
     return f"{value:.3f}".rstrip("0").rstrip(".")
+
+
+def fmt_score(value):
+    return f"{value:.0f}" if value else "-"
 
 
 # --- table ---------------------------------------------------------
@@ -44,6 +64,12 @@ Reads the pi model config plus the pi-model-doctor models.dev cache,
 groups equivalent models across providers, and prints a price table.
 All prices are US dollars per million tokens.
 """
+
+
+COLUMN_ORDER = ["orcarouter", "edenai", "cortecs", "neuralwatt", "hetzner"]
+
+# Config key -> artificial analysis key, for names that differ.
+ALIASES = {}
 
 
 def normalise(model_id):
@@ -74,7 +100,9 @@ def load_config(path):
                 "reasoning": bool(model.get("reasoning")),
                 "measured": False,
             })
-    return rows, list(providers)
+    # Fixed column order, anything unlisted trails in config order.
+    rank = {p: i for i, p in enumerate(COLUMN_ORDER)}
+    return rows, sorted(providers, key=lambda p: rank.get(p, len(rank)))
 
 
 def apply_overrides(rows, path):
@@ -104,6 +132,13 @@ def load_names(path, providers):
             if model.get("name"):
                 names.setdefault(normalise(model_id), model["name"])
     return names
+
+
+def load_scores(path):
+    """Map model key to its artificial analysis score entry."""
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text())["models"]
 
 
 def blended(row, weight):
@@ -142,6 +177,7 @@ def group(rows, names, weight, count_free):
             "name": names.get(key, entries[0]["id"]),
             "entries": entries,
             "best": best,
+            "worst": worst,
             "save": save,
             "cheapest_price": best["blended"] if best else float("inf"),
         })
@@ -152,11 +188,17 @@ def print_table(groups, providers, weight, overrides):
     """Render the comparison table, one row per model."""
     name_width = max(len("model"), *(len(g["name"]) for g in groups))
     widths = [max(len(p), 8) for p in providers]
+    scored = any(g["intel"] is not None for g in groups)
+    coded = any(g["code"] is not None for g in groups)
 
     header = "model".ljust(name_width)
     for provider, width in zip(providers, widths):
         header += "  " + provider.rjust(width)
-    header += "  " + "cheapest".ljust(12) + "save"
+    header += "  save"
+    if scored:
+        header += "  intel"
+    if coded:
+        header += "   code"
     print(header)
     print("-" * len(header))
 
@@ -175,18 +217,28 @@ def print_table(groups, providers, weight, overrides):
                     cell += "~"
                 if row["tiered"]:
                     cell += "+"
-                if row is grp["best"]:
-                    cell += "*"
-            line += "  " + cell.rjust(width)
-        best = grp["best"]
-        line += "  " + (best["provider"] if best else "-").ljust(12)
-        line += f"{grp['save']:.0%}" if grp["save"] > 0 else "-"
+            cell = cell.rjust(width)
+            if row is grp["best"]:
+                cell = paint(cell, GREEN)
+            elif row is grp["worst"]:
+                cell = paint(cell, RED)
+            line += "  " + cell
+        line += "  " + (f"{grp['save']:.0%}" if grp["save"] > 0 else "-").rjust(4)
+        if scored:
+            line += f"  {fmt_score(grp['intel']):>5}"
+        if coded:
+            line += f"  {fmt_score(grp['code']):>5}"
         print(line)
 
     print()
     print(f"USD per million tokens, blended at {weight}:1 input:output.")
-    print("* cheapest   + has tiered pricing above a context threshold")
+    print(f"{paint('cheapest', GREEN)}     {paint('most expensive', RED)}"
+          "     + has tiered pricing above a context threshold")
     print("free?        no pricing in the catalog, excluded from cheapest")
+    if scored:
+        label = "intel, code" if coded else "intel"
+        print(f"{label:12} artificial analysis index scores, from "
+              "https://artificialanalysis.ai/")
     if overrides:
         print(f"~            measured effective rate, not the listed price "
               f"({overrides.get('tariff_source', 'see overrides file')})")
@@ -209,14 +261,14 @@ def write_csv(groups, stream):
     writer = csv.writer(stream)
     writer.writerow(["model", "provider", "id", "input", "output",
                      "cache_read", "blended", "context", "max_tokens",
-                     "reasoning", "tiered", "cheapest"])
+                     "reasoning", "tiered", "cheapest", "intel", "code"])
     for grp in groups:
         for row in grp["entries"]:
             writer.writerow([grp["name"], row["provider"], row["id"],
                              row["input"], row["output"], row["cache_read"],
                              round(row["blended"], 4), row["context"],
                              row["max_tokens"], row["reasoning"], row["tiered"],
-                             row is grp["best"]])
+                             row is grp["best"], grp["intel"], grp["code"]])
 
 
 def cmd_table(args):
@@ -237,10 +289,18 @@ def cmd_table(args):
     names = load_names(args.cache, providers)
     groups = group(rows, names, args.blend, args.count_free)
 
+    scores = load_scores(args.scores)
+    for grp in groups:
+        entry = scores.get(ALIASES.get(grp["key"], grp["key"]), {})
+        grp["intel"] = entry.get("intelligence")
+        grp["code"] = entry.get("coding")
+
     groups.sort(key={
         "price": lambda g: g["cheapest_price"],
         "name": lambda g: g["name"].lower(),
         "save": lambda g: -g["save"],
+        "intel": lambda g: -(g["intel"] or 0),
+        "code": lambda g: -(g["code"] or 0),
     }[args.sort])
 
     if args.csv:
@@ -249,6 +309,76 @@ def cmd_table(args):
     print_table(groups, providers, args.blend, overrides)
     if args.details:
         print_details(groups)
+
+
+# --- scores --------------------------------------------------------
+
+SCORES_DOC = """Fetch artificial analysis index scores.
+
+Downloads the whole model list in one request and keeps the
+intelligence and coding indexes, so the table command can show them
+without going online.
+Needs a free API key from https://artificialanalysis.ai/, passed
+with --key or in AA_API_KEY. Use of the free tier requires
+attribution, which the table legend prints.
+
+Scores are per model, not per provider endpoint, so every provider
+serving a model shares its score.
+"""
+
+AA_URL = "https://artificialanalysis.ai/api/v2/data/llms/models"
+
+
+def fetch_scores(key, timeout):
+    """Return {model key: score entry} from the artificial analysis API."""
+    request = urllib.request.Request(AA_URL, headers={"x-api-key": key})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        payload = json.load(response)
+    entries = payload.get("data", payload) if isinstance(payload, dict) else payload
+    if isinstance(entries, dict):
+        entries = entries.get("models", [])
+
+    scores = {}
+    for model in entries:
+        # Some responses nest the indexes, others keep them flat.
+        evaluations = model.get("evaluations") or model
+        index = evaluations.get("artificial_analysis_intelligence_index")
+        slug = model.get("slug") or model.get("id")
+        if index is None or not slug:
+            continue
+        scores.setdefault(normalise(slug), {
+            "name": model.get("name") or slug,
+            "slug": slug,
+            "intelligence": index,
+            "coding": evaluations.get("artificial_analysis_coding_index"),
+        })
+    return scores
+
+
+def cmd_scores(args):
+    key = args.key or os.environ.get("AA_API_KEY")
+    if not key:
+        sys.exit("no api key: pass --key or set AA_API_KEY")
+
+    scores = fetch_scores(key, args.timeout)
+    if not scores:
+        sys.exit("the api returned no intelligence scores")
+
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps({
+        "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "source": "https://artificialanalysis.ai/",
+        "models": scores,
+    }, indent=2) + "\n")
+    print(f"wrote {len(scores)} scores to {args.out}")
+
+    rows, _ = load_config(args.config)
+    missing = {r["key"]: r["id"] for r in rows
+               if ALIASES.get(r["key"], r["key"]) not in scores}
+    if missing:
+        print("\nno score for these, add them to ALIASES:")
+        for model_key, model_id in sorted(missing.items()):
+            print(f"  {model_key:24} {model_id}")
 
 
 # --- probe ---------------------------------------------------------
@@ -396,6 +526,7 @@ def cmd_probe(args):
     if args.dry_run:
         return
 
+    args.out.parent.mkdir(parents=True, exist_ok=True)
     payload = {}
     if args.out.exists():
         payload = json.loads(args.out.read_text())
@@ -426,7 +557,8 @@ def main():
                        help="model-doctor models.dev cache (default: %(default)s)")
     table.add_argument("--blend", type=float, default=3.0, metavar="N",
                        help="input:output token ratio for blending (default: %(default)s)")
-    table.add_argument("--sort", choices=("price", "name", "save"), default="price",
+    table.add_argument("--sort", default="price",
+                       choices=("price", "name", "save", "intel", "code"),
                        help="row order (default: %(default)s)")
     table.add_argument("--provider", action="append", metavar="ID",
                        help="limit to a provider, repeatable")
@@ -438,8 +570,20 @@ def main():
                        help="let unpriced entries win the cheapest column")
     table.add_argument("--details", action="store_true",
                        help="also print per-provider limits and modalities")
+    table.add_argument("--scores", type=Path, default=DEFAULT_SCORES,
+                       help="intelligence scores (default: %(default)s)")
     table.add_argument("--csv", action="store_true",
                        help="emit CSV instead of a table")
+
+    scores = commands.add_parser("scores", parents=[shared],
+                                 help="fetch intelligence scores",
+                                 description=SCORES_DOC, formatter_class=plain)
+    scores.set_defaults(run=cmd_scores)
+    scores.add_argument("--key", help="artificial analysis api key "
+                                      "(default: $AA_API_KEY)")
+    scores.add_argument("--out", type=Path, default=DEFAULT_SCORES,
+                        help="scores file to write (default: %(default)s)")
+    scores.add_argument("--timeout", type=int, default=60)
 
     probe = commands.add_parser("probe", parents=[shared], help="measure neuralwatt prices",
                                 description=PROBE_DOC, formatter_class=plain)
@@ -462,7 +606,7 @@ def main():
                        help="print results without writing the overrides file")
 
     argv = sys.argv[1:]
-    if not argv or argv[0] not in ("table", "probe", "-h", "--help"):
+    if not argv or argv[0] not in ("table", "probe", "scores", "-h", "--help"):
         argv.insert(0, "table")
     args = parser.parse_args(argv)
     args.run(args)
