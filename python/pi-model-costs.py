@@ -534,10 +534,10 @@ shifts how much of the mix bills at the fitted input rate.
 """
 
 
-COLUMN_ORDER = ["orcarouter", "edenai", "cortecs", "neuralwatt", "hetzner"]
+COLUMN_ORDER = ["openrouter", "orcarouter", "edenai", "cortecs", "neuralwatt", "hetzner"]
 
 # Column headers, kept short so the table fits in 80 columns.
-SHORT_NAMES = {"orcarouter": "orca", "edenai": "eden", "neuralwatt": "neural"}
+SHORT_NAMES = {"openrouter":"open", "orcarouter": "orca", "edenai": "eden", "neuralwatt": "neural"}
 
 WIDTH = 80
 MIN_COLUMN = 7
