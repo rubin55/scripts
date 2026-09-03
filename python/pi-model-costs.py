@@ -567,9 +567,6 @@ def _terminal_width():
         return WIDTH
 
 
-# Config key -> artificial analysis key, for names that differ.
-ALIASES = {}
-
 # Canonical model id -> ids treated as the same model.
 MODEL_ALIASES = {
     "muse-spark-1.2": [
@@ -941,7 +938,7 @@ def cmd_table(args):
 
     scores = load_scores(args.scores)
     for grp in groups:
-        entry = scores.get(ALIASES.get(grp["key"], grp["key"]), {})
+        entry = scores.get(grp["key"], {})
         grp["intel"] = entry.get("intelligence")
         grp["code"] = entry.get("coding")
 
@@ -1034,11 +1031,9 @@ def cmd_scores(args):
     print(f"wrote {len(scores)} scores to {args.out}")
 
     rows, _ = load_config(args.config)
-    missing = {
-        r["key"]: r["id"] for r in rows if ALIASES.get(r["key"], r["key"]) not in scores
-    }
+    missing = {r["key"]: r["id"] for r in rows if r["key"] not in scores}
     if missing:
-        print("\nno score for these, add them to ALIASES:")
+        print("\nno score for these:")
         for model_key, model_id in sorted(missing.items()):
             print(f"  {model_key:24} {model_id}")
 
