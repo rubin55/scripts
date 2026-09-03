@@ -18,6 +18,7 @@ import json
 import math
 import os
 import re
+import shutil
 import statistics
 import subprocess
 import sys
@@ -534,16 +535,49 @@ shifts how much of the mix bills at the fitted input rate.
 """
 
 
-COLUMN_ORDER = ["openrouter", "orcarouter", "edenai", "cortecs", "neuralwatt", "hetzner"]
+COLUMN_ORDER = [
+    "opencode",
+    "openrouter",
+    "orcarouter",
+    "edenai",
+    "cortecs",
+    "neuralwatt",
+    "hetzner",
+]
 
 # Column headers, kept short so the table fits in 80 columns.
-SHORT_NAMES = {"openrouter":"open", "orcarouter": "orca", "edenai": "eden", "neuralwatt": "neural"}
+SHORT_NAMES = {
+    "opencode": "ocode",
+    "openrouter": "oroute",
+    "orcarouter": "orca",
+    "edenai": "eden",
+    "neuralwatt": "nwatt",
+}
 
 WIDTH = 80
 MIN_COLUMN = 7
 
+
+def _terminal_width():
+    """Current terminal width, or WIDTH when not a tty."""
+    try:
+        cols = shutil.get_terminal_size(fallback=(WIDTH, 24)).columns
+        return cols if cols > 0 else WIDTH
+    except Exception:
+        return WIDTH
+
+
 # Config key -> artificial analysis key, for names that differ.
 ALIASES = {}
+
+# Canonical model id -> ids treated as the same model.
+MODEL_ALIASES = {
+    "muse-spark-1.2": [
+        "muse-spark-1.2",
+        "muse-spark-1.2-contributor",
+        "muse-spark-1.2-contributor-free",
+    ],
+}
 
 
 def normalise(model_id):
@@ -552,6 +586,20 @@ def normalise(model_id):
     key = key.split("@", 1)[0]  # drop region suffix
     key = re.sub(r"-\d{4,8}$", "", key)  # drop dated snapshot suffix
     return key.replace("-", "").replace("_", "").replace(".", "")
+
+
+_ALIAS_MAP = {
+    normalise(variant): normalise(canonical)
+    for canonical, variants in MODEL_ALIASES.items()
+    for variant in variants
+}
+
+_CANONICAL_DISPLAY = {normalise(k): k for k in MODEL_ALIASES}
+
+
+def canonical_key(key):
+    """Map a normalised key through MODEL_ALIASES, or return it."""
+    return _ALIAS_MAP.get(key, key)
 
 
 def load_config(path):
@@ -565,7 +613,7 @@ def load_config(path):
                 {
                     "provider": provider,
                     "id": model["id"],
-                    "key": normalise(model["id"]),
+                    "key": canonical_key(normalise(model["id"])),
                     "input": cost.get("input", 0.0),
                     "output": cost.get("output", 0.0),
                     # None means the catalog lists no cache price.
@@ -616,7 +664,12 @@ def load_names(path, providers):
     for provider in providers:
         for model_id, model in catalog.get(provider, {}).get("models", {}).items():
             if model.get("name"):
-                names.setdefault(normalise(model_id), model["name"])
+                ck = canonical_key(normalise(model_id))
+                name = model["name"]
+                prev = names.get(ck)
+                # Keep the shortest name when several variants map together.
+                if prev is None or len(name) < len(prev):
+                    names[ck] = name
     return names
 
 
@@ -624,7 +677,13 @@ def load_scores(path):
     """Map model key to its artificial analysis score entry."""
     if not path.exists():
         return {}
-    return read_json(path)["models"]
+    raw = read_json(path)["models"]
+    # Fold any variant keys already on disk onto their canonical.
+    scores = {}
+    for key, value in raw.items():
+        ck = canonical_key(key)
+        scores.setdefault(ck, value)
+    return scores
 
 
 def cache_price(row):
@@ -679,7 +738,7 @@ def group(rows, names, weight, cached, count_free):
         result.append(
             {
                 "key": key,
-                "name": names.get(key, entries[0]["id"]),
+                "name": names.get(key, _CANONICAL_DISPLAY.get(key, entries[0]["id"])),
                 "entries": entries,
                 "best": best,
                 "worst": worst,
@@ -704,11 +763,15 @@ def cell_text(row):
     return text
 
 
-def measure_table(groups, providers, tail):
+def measure_table(groups, providers, tail, max_width=None):
     """Work out the column headers, cells and widths.
 
-    Names take whatever the fixed columns leave of the 80.
+    Model names take whatever the terminal leaves. If the table fits
+    within max_width the names are shown in full, otherwise the name
+    column is shortened.
     """
+    if max_width is None:
+        max_width = _terminal_width()
     heads = [(SHORT_NAMES.get(p) or p)[:MIN_COLUMN] for p in providers]
     cells = {}
     for grp in groups:
@@ -719,8 +782,14 @@ def measure_table(groups, providers, tail):
     widths = [
         max(MIN_COLUMN, *(len(cells[g["key"], p]) for g in groups)) for p in providers
     ]
-    room = WIDTH - sum(w + 1 for w in widths) - tail
-    name_width = min(max(len("model"), *(len(g["name"]) for g in groups)), room)
+    max_name = (
+        max(len("model"), *(len(g["name"]) for g in groups)) if groups else len("model")
+    )
+    room = max_width - sum(w + 1 for w in widths) - tail
+    if max_name <= room:
+        name_width = max_name
+    else:
+        name_width = min(max_name, max(len("model"), room))
     return heads, cells, widths, name_width
 
 
@@ -729,7 +798,8 @@ def print_table(groups, providers, weight, cached, window):
     scored = any(g["intel"] is not None for g in groups)
     coded = any(g["code"] is not None for g in groups)
     tail = 6 + (6 if scored else 0) + (6 if coded else 0)
-    heads, cells, widths, name_width = measure_table(groups, providers, tail)
+    max_width = _terminal_width()
+    heads, cells, widths, name_width = measure_table(groups, providers, tail, max_width)
 
     header = "model".ljust(name_width)
     for head, width in zip(heads, widths, strict=True):
@@ -791,8 +861,9 @@ def print_legend(columns, weight, cached, window, scored, coded):
 def print_details(groups):
     """Print per-model context, output ceiling and reasoning support."""
     print("\nlisted input and output price, context, output ceiling")
+    detail_width = _terminal_width()
     for grp in sorted(groups, key=lambda g: g["key"]):
-        print(f"\n{grp['name'][:WIDTH]}")
+        print(f"\n{grp['name'][:detail_width]}")
         for row in sorted(grp["entries"], key=lambda r: r["blended"]):
             ctx = f"{row['context'] / 1000:.0f}K" if row["context"] else "?"
             out = f"{row['max_tokens'] / 1000:.0f}K" if row["max_tokens"] else "?"
@@ -928,7 +999,7 @@ def fetch_scores(key, timeout):
         if index is None or not slug:
             continue
         scores.setdefault(
-            normalise(slug),
+            canonical_key(normalise(slug)),
             {
                 "name": model.get("name") or slug,
                 "slug": slug,
