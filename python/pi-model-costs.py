@@ -578,6 +578,30 @@ MODEL_ALIASES = {
         "deepseek-v4-pro",
         "deepseek-v4-pro-0813",
     ],
+    "mistral-medium-3": [
+        "mistral-medium-2505",
+    ],
+    "mistral-medium-3.1": [
+        "mistral-medium-2508",
+    ],
+    "mistral-medium-3.5": [
+        "mistral-medium-2604",
+    ],
+    "mistral-small-3.1": [
+        "mistral-small-2503",
+    ],
+    "mistral-small-3.2": [
+        "mistral-small-2506",
+    ],
+    "mistral-small-4": [
+        "mistral-small-2603",
+    ],
+    "mistral-large-2": [
+        "mistral-large-2411",
+    ],
+    "mistral-large-3": [
+        "mistral-large-2512",
+    ],
     "muse-spark-1.2": [
         "muse-spark-1.2",
         "muse-spark-1.2-contributor",
@@ -595,7 +619,11 @@ def normalise(model_id):
     """Reduce a provider-specific id to a comparable model key."""
     key = model_id.rsplit("/", 1)[-1].lower()
     key = key.split("@", 1)[0]  # drop region suffix
-    key = re.sub(r"-\d{4,8}$", "", key)  # drop dated snapshot suffix
+    if not re.fullmatch(
+        r"(mistral-(medium|small|large)|codestral)-2[4-8](0[1-9]|1[0-2])",
+        key,
+    ):
+        key = re.sub(r"-\d{4,8}$", "", key)  # drop dated snapshot suffix
     return key.replace("-", "").replace("_", "").replace(".", "")
 
 
@@ -840,33 +868,6 @@ def print_table(groups, providers, weight, cached, window):
         if coded:
             line += f"{fmt_score(grp['code']):>6}"
         print(line)
-
-    print_legend(
-        zip(heads, providers, strict=True), weight, cached, window, scored, coded
-    )
-
-
-def print_legend(columns, weight, cached, window, scored, coded):
-    """Explain the marks under the table."""
-    print()
-    print(
-        f"USD per million tokens at {weight}:1 prompt:output, "
-        f"{cached:.0%} of prompt cached."
-    )
-    print(
-        f"{paint('cheapest', GREEN)}  {paint('most expensive', RED)}"
-        "  + tiered above a context threshold"
-    )
-    print("free?  no pricing in the catalog, excluded from cheapest")
-    if scored:
-        label = "intel, code" if coded else "intel"
-        print(f"{label}  artificial analysis index, https://artificialanalysis.ai/")
-    if window:
-        print("~  rate measured from your own traffic, not the listed price")
-        print(f"   {window}")
-    shortened = [f"{head}={provider}" for head, provider in columns if head != provider]
-    if shortened:
-        print("columns: " + ", ".join(shortened))
 
 
 def print_details(groups):
