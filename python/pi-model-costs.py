@@ -88,7 +88,7 @@ def fmt_cell(value):
 
 
 def fmt_score(value):
-    return f"{value:.0f}" if value else "-"
+    return f"{value:.1f}" if value else "-"
 
 
 # --- usage ---------------------------------------------------------
