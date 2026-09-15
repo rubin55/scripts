@@ -569,6 +569,10 @@ def _terminal_width():
 
 # Canonical model id -> ids treated as the same model.
 MODEL_ALIASES = {
+    "DeepSeek V4.1 Flash": [
+        "deepseek-v4.1-flash",
+        "deepinfra/deepseek-ai/DeepSeek-V4.1-Flash"
+    ],
     "deepseek-v4-flash": [
         "deepseek-v4-flash",
         "deepseek-v4-flash-free",
