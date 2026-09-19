@@ -2,8 +2,9 @@
 
 nvim='/usr/bin/nvim'
 
-# Socket path for the running nvim server.
-socket="${XDG_RUNTIME_DIR:-/tmp}/nvim-${USER}.sock"
+# Socket path for the running nvim server. The name matches the
+# nvim-mcp.*.sock glob that nvim-mcp looks for in manual mode.
+socket="${XDG_RUNTIME_DIR:-/tmp}/nvim-mcp.${USER}.sock"
 
 # Parse flags. -w makes the script wait until all opened files are closed
 # in the existing nvim instance (or nvim itself exits).
@@ -18,7 +19,7 @@ while [ $# -gt 0 ]; do
 done
 
 # Check if nvim is running for the current user with our socket.
-if [ -S "$socket" ] && pgrep -u "$USER" nvim > /dev/null 2>&1; then
+if [ -S "$socket" ] && pgrep -u "$USER" -x nvim > /dev/null 2>&1; then
     # nvim is running.
     if [ $# -eq 0 ]; then
         echo "Neovim is already running. Provide a file to open in the existing instance." >&2
