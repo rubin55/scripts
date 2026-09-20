@@ -244,9 +244,10 @@ def number(value):
     if value is None or isinstance(value, bool):
         return None
     try:
-        return float(value)
+        result = float(value)
     except (TypeError, ValueError):
         return None
+    return result if math.isfinite(result) else None
 
 
 def cache_of(pricing):
@@ -295,14 +296,18 @@ def slugs(model_id):
     return names | {squash(name) for name in names}
 
 
+def model_items(payload):
+    """The model list from a /models reply, or None if it has none."""
+    if isinstance(payload, dict):
+        for key in ("data", "models"):
+            if isinstance(payload.get(key), list):
+                return payload[key]
+    return None
+
+
 def index_models(payload):
     """Map every slug a provider serves to its prices."""
-    items = []
-    for key in ("data", "models"):
-        value = payload.get(key)
-        if isinstance(value, list):
-            items = [e for e in value if isinstance(e, dict)]
-            break
+    items = [e for e in (model_items(payload) or []) if isinstance(e, dict)]
     index = {}
     for entry in items:
         model_id = entry.get("id")
@@ -340,14 +345,15 @@ def resolve(index, catalog, names):
     # states what a cache hit costs.
     if best[2] is None:
         listed = catalog_price(catalog, {slug})
-        if listed and listed[2] is not None:
+        if listed and listed[2] is not None and listed[3] == best[3]:
             best = (best[0], best[1], listed[2], best[3])
     return "ok", best
 
 
 def index_catalog(catalog, provider_id):
     """Slug to price map for one provider in the models.dev data."""
-    models = (catalog.get(provider_id) or {}).get("models")
+    entry = catalog.get(provider_id) if isinstance(catalog, dict) else None
+    models = entry.get("models") if isinstance(entry, dict) else None
     index = {}
     if not isinstance(models, dict):
         return index
@@ -404,8 +410,8 @@ def models_dev(timeout, max_age):
     if isinstance(cached, dict):
         return cached
     payload, err = get_json(MODELS_DEV_URL, timeout)
-    if err or not payload:
-        warn(f"models.dev unavailable: {err or 'empty response'}")
+    if err or not isinstance(payload, dict):
+        warn(f"models.dev unavailable: {err or 'unexpected response'}")
         return {}
     cache_write("models-dev", payload)
     return payload
@@ -425,10 +431,11 @@ def balance_of(payload):
         if value is not None:
             return value, currency
     for value in payload.values():
-        if isinstance(value, dict):
-            found = balance_of(value)
-            if found is not None:
-                return found
+        for item in value if isinstance(value, list) else [value]:
+            if isinstance(item, dict):
+                found = balance_of(item)
+                if found is not None:
+                    return found
     return None
 
 
@@ -496,11 +503,13 @@ def firefox_cookie(spec):
     for path in dbs:
         try:
             db = sqlite3.connect(f"file:{path}?mode=ro&immutable=1", uri=True)
-            row = db.execute(
-                "select value from moz_cookies where host = ? and name = ?",
-                (host, name),
-            ).fetchone()
-            db.close()
+            try:
+                row = db.execute(
+                    "select value from moz_cookies where host = ? and name = ?",
+                    (host, name),
+                ).fetchone()
+            finally:
+                db.close()
         except sqlite3.Error:
             continue
         if row and row[0]:
@@ -636,8 +645,8 @@ def fetch_window(base_url, path, token, start, end, timeout):
         if cursor:
             page += "&cursor=" + urllib.parse.quote(cursor, safe="")
         payload, err = get_usage_page(page, token, timeout)
-        if err or not payload:
-            return rows, accounting, err or "empty response"
+        if err or not isinstance(payload, dict):
+            return rows, accounting, err or "unexpected response"
         rows += payload.get("requests") or []
         accounting = accounting or payload.get("accounting_method")
         cursor = payload.get("next_cursor")
@@ -669,7 +678,9 @@ def update_usage(provider, cached, timeout):
 
     # Forward from the newest row held, or the whole window when the
     # cache is empty.
-    newest = max((r["created_at"] for r in rows.values()), default=None)
+    newest = max(
+        (r["created_at"] for r in rows.values() if r.get("created_at")), default=None
+    )
     start = now - span
     if newest:
         start = max(start, datetime.fromisoformat(newest) - timedelta(minutes=5))
@@ -688,12 +699,13 @@ def update_usage(provider, cached, timeout):
     walked = datetime.fromisoformat(edge) if edge else now - span
     empty = 0
     while not cached.get("complete") and empty < USAGE_EMPTY_STOP:
-        end, walked = walked, walked - span
-        note(f"{name}: walking back to {walked:%Y-%m-%d}")
-        older, _, err = fetch_window(base_url, path, token, walked, end, timeout)
+        probe = walked - span
+        note(f"{name}: walking back to {probe:%Y-%m-%d}")
+        older, _, err = fetch_window(base_url, path, token, probe, walked, timeout)
         if err:
             warn(f"{name}: usage api: {err}")
             break
+        walked = probe
         if not older:
             empty += 1
             continue
@@ -710,7 +722,9 @@ def update_usage(provider, cached, timeout):
         "accounting_method": accounting,
         "walked_to": walked.isoformat(timespec="seconds"),
         "complete": complete,
-        "requests": sorted(rows.values(), key=lambda r: r["created_at"], reverse=True),
+        "requests": sorted(
+            rows.values(), key=lambda r: r.get("created_at") or "", reverse=True
+        ),
     }
 
 
@@ -719,18 +733,18 @@ def by_model(rows):
     models = {}
     for row in rows:
         name = row.get("requested_model") or row.get("model")
-        prompt = row.get("prompt_tokens")
-        output = row.get("completion_tokens")
+        prompt = number(row.get("prompt_tokens"))
+        output = number(row.get("completion_tokens"))
         if not name or prompt is None or output is None:
             continue
-        cached = min(row.get("cached_tokens") or 0, prompt)
+        cached = min(number(row.get("cached_tokens")) or 0, prompt)
         models.setdefault(name, []).append(
             {
                 "prompt": prompt,
                 # Cache hits skip the prefill, so they are not input.
                 "input": prompt - cached,
                 "output": output,
-                "cost": row.get("cost_usd") or 0.0,
+                "cost": number(row.get("cost_usd")) or 0.0,
             }
         )
     return models
@@ -746,7 +760,8 @@ def aggregate(requests):
     bands = {}
     for entry in requests:
         edges = [e for e in BANDS if e <= entry["prompt"]]
-        bands.setdefault(edges[-1], []).append(entry)
+        if edges:
+            bands.setdefault(edges[-1], []).append(entry)
     points = [
         {
             "input": statistics.median(e["input"] for e in group),
@@ -810,13 +825,15 @@ def analyse(requests, listed):
 
     spent = sum(e["cost"] for e in requests)
     shaped = sum(low * e["input"] + high * e["output"] for e in requests)
+    if not shaped:
+        return listed_in, listed_out, method
     # The bands give the ratio between the rates, the spend gives
     # their level.
-    scale = spent / shaped if shaped else 0.0
+    scale = spent / shaped
     return low * scale * 1e6, high * scale * 1e6, method
 
 
-def measure(provider, listed, timeout, update):
+def measure(provider, listed, currency, timeout, update):
     """Price an energy billed provider from its own usage history."""
     name = str(provider.get("name", "?"))
     # History never goes stale, so the cache does not expire. It is
@@ -844,7 +861,7 @@ def measure(provider, listed, timeout, update):
         # The fit charges the whole spend to fresh input and output,
         # so a cache hit carries nothing on top.
         for slug in slugs(model):
-            index[slug] = (low, high, 0.0, "USD")
+            index[slug] = (low, high, 0.0, currency)
     return index
 
 
@@ -886,8 +903,12 @@ def evaluations(evaluators, timeout, max_age):
                 USER_AGENT,
                 str(evaluator.get("auth_header") or ""),
             )
-            if err or not payload:
-                warn(f"{name}: {err or 'empty response'}")
+            if (
+                err
+                or not isinstance(payload, dict)
+                or not isinstance(payload.get("data"), list)
+            ):
+                warn(f"{name}: {err or 'no data in response'}")
                 continue
             cache_write(name, payload)
         for entry in payload.get("data") or []:
@@ -906,11 +927,15 @@ def fx_rates(base, timeout, max_age):
     if isinstance(cached, dict) and cached.get("rates"):
         return cached["rates"]
     payload, err = get_json(FX_URL.format(base), timeout)
-    if err or not payload:
-        warn(f"exchange rates unavailable: {err or 'empty response'}")
+    if (
+        err
+        or not isinstance(payload, dict)
+        or not isinstance(payload.get("rates"), dict)
+    ):
+        warn(f"exchange rates unavailable: {err or 'no rates in response'}")
         return {base: 1.0}
     rates = {base: 1.0}
-    for code, value in (payload.get("rates") or {}).items():
+    for code, value in payload["rates"].items():
         rate = number(value)
         if rate:
             rates[code.upper()] = rate
@@ -961,11 +986,10 @@ def parse_ratio(text):
     """Weights from a ratio: 3:1 is input to output, 7:2:1 puts a
     cache hit share in front of it."""
     fields = text.split(":") if ":" in text else [text, "1"]
-    try:
-        weights = [float(f) for f in fields]
-    except ValueError:
+    weights = [w for f in fields if (w := number(f)) is not None]
+    if len(weights) != len(fields) or len(weights) not in (2, 3):
         return None
-    if len(weights) not in (2, 3) or min(weights) < 0 or sum(weights) <= 0:
+    if min(weights) < 0 or sum(weights) <= 0:
         return None
     total = sum(weights)
     return tuple(w / total for w in weights)
@@ -991,7 +1015,7 @@ def collect(providers, timeout, max_age):
     def one(provider):
         name = provider.get("name", "?")
         payload = cache_read(f"models-{name}", max_age)
-        if isinstance(payload, dict):
+        if model_items(payload) is not None:
             return name, index_models(payload), None
         base_url = provider.get("base_url")
         if not base_url:
@@ -1007,6 +1031,8 @@ def collect(providers, timeout, max_age):
         )
         if err:
             return name, {}, err
+        if model_items(payload) is None:
+            return name, {}, "no model list in response"
         cache_write(f"models-{name}", payload)
         return name, index_models(payload), None
 
@@ -1015,13 +1041,23 @@ def collect(providers, timeout, max_age):
 
 
 def listed_pairs(index):
-    """Slug to (input, output) as the provider lists them."""
+    """Slug to its cheapest listed (input, output)."""
     pairs = {}
     for slug, prices in index.items():
+        priced = [p for p in prices if p]
+        if priced:
+            best = min(priced, key=lambda p: (p[0], p[1]))
+            pairs[slug] = (best[0], best[1])
+    return pairs
+
+
+def listed_currency(index):
+    """The currency a provider lists its prices in, or USD."""
+    for prices in index.values():
         for price in prices:
             if price:
-                pairs.setdefault(slug, (price[0], price[1]))
-    return pairs
+                return price[3]
+    return "USD"
 
 
 def build_rows(
@@ -1052,11 +1088,10 @@ def build_rows(
             # An energy billed account pays its own measured rate,
             # not the one the provider lists.
             rated_by_use = measured.get(provider) or {}
+            hits = [rated_by_use[c] for c in names if c in rated_by_use]
             mark = ""
-            for candidate in names:
-                if candidate in rated_by_use:
-                    price, mark = rated_by_use[candidate], MEASURED
-                    break
+            if hits:
+                price, mark = min(hits, key=lambda p: (p[0], p[1])), MEASURED
             value = convert(price, base, rates, missing)
             if weights:
                 blended, guessed = blend(value, weights)
@@ -1148,7 +1183,7 @@ def render(rows, headers, credits, use_color):
         size = [s for s in size if s[0]]
         parts.append((size, mark_width))
         span = max(len(headers[i + 1]), cell_span(size, mark_width), label)
-        widths.append(max(span, len(credits[i])) if i < len(credits) else span)
+        widths.append(max(span, len(credits[i])))
     for i in range(trail):
         header = headers[len(headers) - trail + i]
         widths.append(max([len(header)] + [len(s[i]) for s in scores]))
@@ -1182,7 +1217,7 @@ def render(rows, headers, credits, use_color):
                 + paint(mark, DIM, use_color)
                 + " " * (mark_width - len(mark))
             )
-            seen.update(mark)
+            seen.update(set(mark))
             out.append(text + " " * (width - cell_span(size, mark_width)))
         for i, text in enumerate(rated):
             cell = text.rjust(widths[len(widths) - trail + i])
@@ -1280,8 +1315,13 @@ def main(argv=None):
         if str(provider.get("pricing") or "token") != "energy":
             continue
         name = str(provider.get("name", "?"))
+        index = indexes.get(name, {})
         measured[name] = measure(
-            provider, listed_pairs(indexes.get(name, {})), args.timeout, args.update
+            provider,
+            listed_pairs(index),
+            listed_currency(index),
+            args.timeout,
+            args.update,
         )
 
     missing = set()
@@ -1323,4 +1363,11 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except BrokenPipeError:
+        try:
+            sys.stdout.close()
+        except OSError:
+            pass
+        sys.exit(0)
