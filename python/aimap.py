@@ -414,6 +414,7 @@ def models_dev(timeout, max_age):
         warn(f"models.dev unavailable: {err or 'unexpected response'}")
         return {}
     cache_write("models-dev", payload)
+    note("models.dev: fetched")
     return payload
 
 
@@ -558,6 +559,7 @@ def get_balance(provider, timeout, max_age):
     cached = cache_read(f"balance-{name}", max_age)
     if isinstance(cached, dict) and "balance" in cached:
         return cached["balance"], cached.get("currency") or "USD"
+    note(f"{name}: fetching balance")
     base_url = provider.get("base_url")
     found = None
     if provider.get("balance_cookie"):
@@ -888,6 +890,7 @@ def evaluations(evaluators, timeout, max_age):
         name = str(evaluator.get("name") or "evaluator")
         payload = cache_read(name, max_age)
         if not isinstance(payload, dict):
+            note(f"{name}: fetching evaluations")
             base_url = evaluator.get("base_url")
             if not base_url:
                 warn(f"{name}: no base_url")
@@ -911,6 +914,7 @@ def evaluations(evaluators, timeout, max_age):
                 warn(f"{name}: {err or 'no data in response'}")
                 continue
             cache_write(name, payload)
+            note(f"{name}: fetched")
         for entry in payload.get("data") or []:
             if not isinstance(entry, dict):
                 continue
@@ -940,6 +944,7 @@ def fx_rates(base, timeout, max_age):
         if rate:
             rates[code.upper()] = rate
     cache_write(f"fx-{base}", {"rates": rates})
+    note("exchange rates: fetched")
     return rates
 
 
@@ -1034,6 +1039,7 @@ def collect(providers, timeout, max_age):
         if model_items(payload) is None:
             return name, {}, "no model list in response"
         cache_write(f"models-{name}", payload)
+        note(f"{name}: models fetched")
         return name, index_models(payload), None
 
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -1292,6 +1298,8 @@ def main(argv=None):
     if args.ratio and args.verbose:
         warn("--ratio has no effect with --verbose")
     max_age = 0 if args.update else CACHE_TTL
+    if args.update:
+        note("updating")
     rates = {base: 1.0} if args.no_fx else fx_rates(base, args.timeout, max_age)
     catalog = models_dev(args.timeout, max_age)
     catalogs = {
