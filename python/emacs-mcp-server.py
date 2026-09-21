@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Lazy Emacs MCP bridge modeled on nvim-mcp (manual mode).
+"""Lazy Emacs MCP bridge with manual connect.
 
-Stays alive when Emacs is down. Only get_targets/connect show
-before a connection exists; Emacs tools appear after connect,
-like nvim-mcp. Forwards tool calls to Emacs per call.
+Stays alive when Emacs is down. Only local tools show
+before a connection exists; Emacs tools appear after
+connect. Forwards tool calls to Emacs per call.
 """
 
 import argparse
@@ -53,10 +53,9 @@ def expand(path):
 
 
 def connection_id(target, existing=()):
-    """Short deterministic id for a socket path, like nvim-mcp.
+    """Short deterministic id for a socket path.
 
-    nvim-mcp uses 7 hex chars of blake3; we use sha256 since
-    blake3 is not in stdlib. Probes offsets on collision.
+    Uses 7 hex chars of sha256. Probes offsets on collision.
     """
     digest = hashlib.sha256(target.encode("utf-8")).hexdigest()
     taken = set(existing)
@@ -101,9 +100,6 @@ def resolve_socket(cli_path, mode):
     """Pick socket without exiting when none exists."""
     if cli_path:
         return expand(cli_path)
-    env = os.getenv("EMACS_MCP_SOCKET")
-    if env and mode != "auto":
-        return expand(env)
     if mode not in ("auto", "manual"):
         return expand(mode)  # explicit target path
     found = find_sockets()
@@ -242,15 +238,14 @@ def emacs_tools(sock_path, timeout):
 
 class Bridge:
     def __init__(self, sock_path, timeout, probe_timeout=2,
-                 mode="manual", always_expose=False):
+                 mode="manual"):
         self.active = sock_path
         self.timeout = timeout
         self.probe_timeout = probe_timeout
         self.mode = mode
-        self.always_expose = always_expose
         self.next_id = 0
         self.connections = {}
-        # Like nvim-mcp manual mode: start disconnected. Auto
+        # Manual mode starts disconnected. Auto
         # or explicit target modes connect when live.
         if mode != "manual" and probe_live(sock_path):
             self.connections[self.id_for_target(sock_path)] = sock_path
@@ -267,7 +262,7 @@ class Bridge:
               "method": "notifications/tools/list_changed"})
 
     def connections_instruction(self):
-        """Status text for get_targets, like nvim-mcp."""
+        """Status text for get_targets."""
         lines = ["## Connection Status", "",
                  f"Connection mode: `{self.mode}`", ""]
         if not self.connections:
@@ -299,7 +294,7 @@ class Bridge:
                 t["description"] = (
                     t["description"] + "\n\n"
                     + self.connections_instruction()).strip()
-        if self.connections or self.always_expose:
+        if self.connections:
             seen = {t["name"] for t in tools}
             sockets = list(dict.fromkeys(
                 self.connections.values())) or [self.active]
@@ -314,8 +309,8 @@ class Bridge:
                     name = tool.get("name")
                     if not name or name in seen:
                         continue
-                    # Inject connection_id like nvim-mcp does
-                    # for dynamic tools, then strip it before
+                    # Inject connection_id for dynamic
+                    # tools, then strip it before
                     # forwarding since Emacs ignores it.
                     schema = tool.get("inputSchema")
                     if not isinstance(schema, dict):
@@ -342,8 +337,8 @@ class Bridge:
             if not any(t.get("name") not in LOCAL_NAMES
                        for t in tools):
                 debug("Emacs unreachable, listing local only")
-        if not self.connections and not self.always_expose:
-            # Like nvim-mcp: hide connection-aware tools
+        if not self.connections:
+            # Hide connection-aware tools
             # (schemas with connection_id) when detached.
             tools = [t for t in tools if "connection_id" not in (
                 (t.get("inputSchema") or {}).get("properties")
@@ -401,7 +396,7 @@ class Bridge:
                 send_result(msg_id, text_result(
                     f"Unknown connection_id: {cid}", is_error=True))
             return
-        # Route by connection_id like nvim-mcp. Strip it
+        # Route by connection_id. Strip it
         # before forwarding since Emacs ignores it.
         cid = args.pop("connection_id", None) \
             if isinstance(args, dict) else None
@@ -545,12 +540,9 @@ class Bridge:
 def main():
     ap = argparse.ArgumentParser(description="Lazy Emacs MCP bridge")
     ap.add_argument("socket_path", nargs="?",
-                    help="Emacs socket path, else env or discovery")
+                    help="Emacs socket path, else discovery")
     ap.add_argument("--connect", default="manual",
                     help="auto, manual, or explicit socket path")
-    ap.add_argument("--always-expose-connection-tools", action="store_true",
-                    help="list Emacs tools even when detached, "
-                    "like nvim-mcp; calls still need connect")
     ap.add_argument("--timeout", type=int, default=10)
     ap.add_argument("--list-sockets", action="store_true")
     ap.add_argument("--test-connection", action="store_true")
@@ -565,10 +557,8 @@ def main():
 
     sock_path = resolve_socket(args.socket_path, args.connect)
     timeout = int(os.getenv("EMACS_MCP_TIMEOUT", str(args.timeout)))
-    always_expose = args.always_expose_connection_tools or bool(
-        os.getenv("EMACS_MCP_ALWAYS_EXPOSE"))
-    # Explicit target behaves like nvim-mcp specific-target
-    # mode: connect now instead of waiting for connect tool.
+    # Explicit target connects now instead of waiting
+    # for connect tool.
     mode = args.connect
     if args.socket_path or mode not in ("auto", "manual"):
         mode = args.socket_path or args.connect
@@ -582,8 +572,7 @@ def main():
             sys.exit(1)
         return
 
-    Bridge(sock_path, timeout, mode=mode,
-           always_expose=always_expose).run()
+    Bridge(sock_path, timeout, mode=mode).run()
 
 
 if __name__ == "__main__":
