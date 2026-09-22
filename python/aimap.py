@@ -72,9 +72,10 @@ Config format:
   balance_field = "credits"              # its key in that page
   # Or, for credit shown only to a logged-in browser:
   balance_cookie = "host/name"           # session cookie from Firefox
-  balance_page_url = "..."               # page it unlocks
-  balance_pattern = "balance:(\\d+)"     # captures the number
-  balance_scale = 1e8                    # divides it into the currency
+  balance_api_url = "..."                # json endpoint it unlocks
+  balance_field = "credits"              # its key in that reply
+  balance_headers = { x-org-id = "..." } # optional request headers
+  balance_scale = 1e8                    # optional currency divisor
 
   [[model_evaluators]]
   name = "artificial-analysis"                       # also the cache file
@@ -96,7 +97,6 @@ import glob
 import json
 import math
 import os
-import re
 import sqlite3
 import statistics
 import subprocess
@@ -192,12 +192,14 @@ def load_config(path):
         return tomllib.load(f)
 
 
-def get_json(url, timeout, token=None, user_agent=USER_AGENT, auth_header=None):
+def get_json(url, timeout, token=None, user_agent=USER_AGENT, auth_header=None,
+             extra=None):
     headers = {"Accept": "application/json", "User-Agent": user_agent}
     if token and auth_header and auth_header.lower() != "authorization":
         headers[auth_header] = token
     elif token:
         headers["Authorization"] = f"Bearer {token}"
+    headers.update(extra or {})
     req = urllib.request.Request(url, headers=headers, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -519,38 +521,26 @@ def firefox_cookie(spec):
 
 
 def cookie_balance(provider, timeout):
-    """Balance scraped from a page a browser session cookie unlocks.
+    """Get balance from with help from cookie in Firefox.
 
     For a site that shows credit only to a logged-in browser. Reads
-    the cookie from Firefox, so it works while that login is valid
-    and falls back to nothing when it is not.
+    the cookie from Firefox. If no valid cookie, returns nothing.
     """
-    cookie = firefox_cookie(provider.get("balance_cookie"))
-    page_url = str(provider.get("balance_page_url") or "")
-    if not cookie or not page_url:
+    name = str(provider.get("name", "?"))
+    spec = str(provider.get("balance_cookie") or "")
+    cookie = firefox_cookie(spec)
+    url = str(provider.get("balance_api_url") or "")
+    field = str(provider.get("balance_field") or "")
+    if not cookie or not url or not field:
         return None
-    name = str(provider.get("balance_cookie")).partition("/")[2]
-    pattern = str(provider.get("balance_pattern") or r"balance:(\d+)")
-    scale = number(provider.get("balance_scale")) or 1.0
-    req = urllib.request.Request(
-        page_url,
-        headers={
-            "Cookie": f"{name}={cookie}",
-            "User-Agent": USER_AGENT,
-            "Accept": "text/html",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            html = resp.read().decode(errors="replace")
-    except (urllib.error.URLError, OSError) as e:
-        warn(f"{provider.get('name', '?')}: balance page: {str(e)[:80]}")
+    headers = {"Cookie": f"{spec.partition('/')[2]}={cookie}"}
+    headers.update(provider.get("balance_headers") or {})
+    payload, err = get_json(url, timeout, extra=headers)
+    value = number(payload.get(field)) if isinstance(payload, dict) else None
+    if value is None:
+        warn(f"{name}: no {field} in balance: {err or 'login expired?'}")
         return None
-    match = re.search(pattern, html)
-    if not match:
-        warn(f"{provider.get('name', '?')}: balance not on page, login expired?")
-        return None
-    return float(match.group(1)) / scale, "USD"
+    return value / (number(provider.get("balance_scale")) or 1.0), "USD"
 
 
 def get_balance(provider, timeout, max_age):
