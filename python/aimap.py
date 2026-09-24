@@ -36,7 +36,8 @@ at more than one effort level, a sel column shows the lowest level
 that keeps a share of the best int score, 95 percent unless --keep
 sets another. --effort shows int and code at a lower effort level,
 or the closest level below it that the evaluator rates. A model the
-evaluator rates at no named level keeps its one score.
+evaluator rates at no named level keeps its one score, but only
+without --effort, as its score at a lower level is unknown.
 
 A provider set to pricing = "energy" bills the power its GPUs draw,
 not tokens, so its listed token prices are not what the account pays.
@@ -953,9 +954,13 @@ def evaluations(evaluators, timeout, max_age, keep, effort):
                 base = slug.removesuffix(f"-{level}")
                 levels = families.setdefault(base, {})
                 levels.setdefault(level, (intelligence, coding))
-    for base, levels in families.items():
-        if base in index:
-            index[base] = at_effort(levels, effort) + (suggest(levels, keep),)
+    for slug in index:
+        if slug in families:
+            levels = families[slug]
+            index[slug] = at_effort(levels, effort) + (suggest(levels, keep),)
+        elif effort != EFFORTS[-1]:
+            # No named levels, so the score at a lower effort is unknown.
+            index[slug] = (None, None, None)
     return index
 
 
@@ -1422,12 +1427,12 @@ def main(argv=None):
     print(f"prices per million tokens in {base} ({shape})")
     if scores:
         print(
-            "suggested effort level (sel) is the lowest effort level that "
-            f"gives {args.keep:g}% of the top intelligence score"
-        )
-        print(
             f"int and code are at effort level {args.effort}, "
             "or the closest level below it"
+        )
+        print(
+            "sel is a suggested effort level that "
+            f"gives {args.keep:g}% of the top int score"
         )
     print(
         f"{paint('green', GREEN, use_color)} = lowest, "
@@ -1444,7 +1449,7 @@ def main(argv=None):
     if GUESSED in seen:
         print(f"{GUESSED} no cache price known, input price used for cache tokens")
     if only:
-        print(f"{ONLY} suggested effort level is the only effort level available")
+        print(f"{ONLY} suggested effort level is the only effort level aa tested")
     for currency in sorted(missing):
         warn(f"no {base} rate for {currency}, shown unconverted")
     return 0
