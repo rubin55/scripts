@@ -31,7 +31,12 @@ looks like a balance is kept, so most providers need no config. These
 are held for an hour, and refreshed by --update.
 
 A configured evaluator adds an int and a code column, holding its
-intelligence and coding index for the model.
+intelligence and coding index for the model. Where it rates the model
+at more than one effort level, a sel column shows the lowest level
+that keeps a share of the best int score, 95 percent unless --keep
+sets another. --effort shows int and code at a lower effort level,
+or the closest level below it that the evaluator rates. A model the
+evaluator rates at no named level keeps its one score.
 
 A provider set to pricing = "energy" bills the power its GPUs draw,
 not tokens, so its listed token prices are not what the account pays.
@@ -88,7 +93,7 @@ Config format:
   aliases = ["deepseek-v4-1-flash"]
 
 Usage:
-  aimap.py [-v | -r 15:1] [-s price] [-b EUR] [-u]
+  aimap.py [-v | -r 15:1] [-s price] [-e high] [-k 90] [-b EUR] [-u]
            [--no-fx] [--no-color] [-t 20] [-c FILE]
 """
 
@@ -133,6 +138,9 @@ BALANCE_KEYS = [
 # Token mix for a blended price, cache hit to input to output. This
 # is the ratio Artificial Analysis states for its blended figure.
 DEFAULT_RATIO = "7:2:1"
+# Effort levels an evaluator rates a model at, lowest first.
+EFFORTS = ["low", "medium", "high", "xhigh", "max"]
+DEFAULT_KEEP = 95.0
 
 RESET = "\033[0m"
 RED = "\033[31m"
@@ -140,6 +148,7 @@ GREEN = "\033[32m"
 DIM = "\033[2m"
 GUESSED = "~"
 MEASURED = "*"
+ONLY = "+"
 
 # Energy billed accounts are priced from the usage api. The window it
 # serves is capped, so history is walked in chunks of that size.
@@ -873,9 +882,32 @@ def score_of(evaluations):
     return intelligence, coding
 
 
-def evaluations(evaluators, timeout, max_age):
-    """Slug to (intelligence, coding) from every configured evaluator."""
-    index = {}
+def effort_of(name):
+    """Effort level in the brackets of a name, such as (xhigh)."""
+    head, _, tail = name.rpartition("(")
+    words = tail.lower().replace(",", " ").replace(")", " ").split()
+    if not head or "non-reasoning" in words:
+        return None
+    return next((w for w in words if w in EFFORTS), None)
+
+
+def suggest(levels, keep):
+    """Lowest effort level that keeps keep percent of the best score."""
+    if len(levels) == 1:
+        return next(iter(levels)) + ONLY
+    floor = max(s[0] for s in levels.values()) * keep / 100
+    return next(e for e in EFFORTS if e in levels and levels[e][0] >= floor)
+
+
+def at_effort(levels, effort):
+    """Scores at this effort level, or the closest level below it."""
+    rated = [e for e in EFFORTS[: EFFORTS.index(effort) + 1] if e in levels]
+    return levels[rated[-1]] if rated else (None, None)
+
+
+def evaluations(evaluators, timeout, max_age, keep, effort):
+    """Slug to (intelligence, coding, sel) from every evaluator."""
+    index, families = {}, {}
     for evaluator in evaluators:
         name = str(evaluator.get("name") or "evaluator")
         payload = cache_read(name, max_age)
@@ -910,8 +942,20 @@ def evaluations(evaluators, timeout, max_age):
                 continue
             slug = entry.get("slug") or entry.get("id")
             scores = entry.get("evaluations")
-            if isinstance(slug, str) and isinstance(scores, dict):
-                index.setdefault(normalize(slug), score_of(scores))
+            if not isinstance(slug, str) or not isinstance(scores, dict):
+                continue
+            slug = normalize(slug)
+            intelligence, coding = score_of(scores)
+            index.setdefault(slug, (intelligence, coding, None))
+            # Variants are named base-level, the top level just base.
+            level = effort_of(str(entry.get("name") or ""))
+            if level and intelligence is not None:
+                base = slug.removesuffix(f"-{level}")
+                levels = families.setdefault(base, {})
+                levels.setdefault(level, (intelligence, coding))
+    for base, levels in families.items():
+        if base in index:
+            index[base] = at_effort(levels, effort) + (suggest(levels, keep),)
     return index
 
 
@@ -1070,7 +1114,7 @@ def build_rows(
         names = set(ordered) | {squash(n) for n in ordered}
         rated = next(
             (scores[key] for key in map(normalize, ordered) if key in scores),
-            (None, None),
+            (None, None, None),
         )
         cells = []
         for provider, index, err in results:
@@ -1153,7 +1197,17 @@ def render(rows, headers, credits, use_color):
             shown.append(tuple(None if v is None else float(v) for v in values))
         printed.append(texts)
         ranked.append(shown)
-        scores.append(["-" if v is None else f"{v:.1f}" for v in rated[:trail]])
+        scores.append(
+            [
+                "-" if v is None else v if isinstance(v, str) else f"{v:.1f}"
+                for v in rated[:trail]
+            ]
+        )
+    # Leave room for a mark, so the words align on their last letter.
+    for i in range(trail):
+        if any(s[i].endswith(ONLY) for s in scores):
+            for s in scores:
+                s[i] += "" if s[i].endswith(ONLY) else " "
 
     # Per column, how wide each number is on either side of its
     # decimal point, plus room for the marks. A number nothing in
@@ -1184,7 +1238,7 @@ def render(rows, headers, credits, use_color):
         header = headers[len(headers) - trail + i]
         widths.append(max([len(header)] + [len(s[i]) for s in scores]))
 
-    print("  ".join(h.ljust(widths[i]) for i, h in enumerate(headers)))
+    print("  ".join(h.ljust(widths[i]) for i, h in enumerate(headers)).rstrip())
     if any(credits):
         line = [" " * widths[0]]
         line += [text.rjust(widths[i + 1]) for i, text in enumerate(credits)]
@@ -1217,7 +1271,7 @@ def render(rows, headers, credits, use_color):
             out.append(text + " " * (width - cell_span(size, mark_width)))
         for i, text in enumerate(rated):
             cell = text.rjust(widths[len(widths) - trail + i])
-            out.append(paint(cell, DIM, use_color) if text == "-" else cell)
+            out.append(paint(cell, DIM, use_color) if text.strip() == "-" else cell)
         print("  ".join(out).rstrip())
     return seen
 
@@ -1244,6 +1298,23 @@ def main(argv=None):
         choices=("name", "price", "int", "intelligence", "code", "coding"),
         metavar="KEY",
         help="order rows by name, price, int or code; default config order",
+    )
+    ap.add_argument(
+        "-e",
+        "--effort",
+        choices=EFFORTS,
+        default="max",
+        metavar="LEVEL",
+        help=f"effort level of the int and code scores, {', '.join(EFFORTS)}; "
+        "default max",
+    )
+    ap.add_argument(
+        "-k",
+        "--keep",
+        type=float,
+        default=DEFAULT_KEEP,
+        metavar="PCT",
+        help="percent of the best int score the sel effort keeps, default 95",
     )
     ap.add_argument(
         "-v",
@@ -1285,6 +1356,9 @@ def main(argv=None):
     if weights is None and not args.verbose:
         print(f"error: bad ratio {ratio!r}, expected 7:2:1 or 3:1", file=sys.stderr)
         return 2
+    if not 0 < args.keep <= 100:
+        print(f"error: bad keep {args.keep:g}, expected above 0, up to 100", file=sys.stderr)
+        return 2
     if args.ratio and args.verbose:
         warn("--ratio has no effect with --verbose")
     max_age = 0 if args.update else CACHE_TTL
@@ -1298,7 +1372,11 @@ def main(argv=None):
         )
         for p in providers
     }
-    scores = evaluations(evaluators, args.timeout, max_age) if evaluators else {}
+    scores = (
+        evaluations(evaluators, args.timeout, max_age, args.keep, args.effort)
+        if evaluators
+        else {}
+    )
     credit = balances(
         providers, args.timeout, 0 if args.update else BALANCE_TTL, base, rates
     )
@@ -1330,7 +1408,7 @@ def main(argv=None):
         args.sort,
     )
     use_color = not args.no_color and sys.stdout.isatty()
-    trail = ["int", "code"] if scores else []
+    trail = ["int", "code", "sel"] if scores else []
 
     if weights:
         mix = "cache, input, output" if len(weights) == 3 else "input, output"
@@ -1342,6 +1420,15 @@ def main(argv=None):
     else:
         shape = "in, out"
     print(f"prices per million tokens in {base} ({shape})")
+    if scores:
+        print(
+            "suggested effort level (sel) is the lowest effort level that "
+            f"gives {args.keep:g}% of the top intelligence score"
+        )
+        print(
+            f"int and code are at effort level {args.effort}, "
+            "or the closest level below it"
+        )
     print(
         f"{paint('green', GREEN, use_color)} = lowest, "
         f"{paint('red', RED, use_color)} = highest\n"
@@ -1349,12 +1436,15 @@ def main(argv=None):
     headers = ["model"] + [name for name, _, _ in results] + trail
     credits = [fmt_balance(credit.get(name)) for name, _, _ in results]
     seen = render(rows, headers, credits, use_color)
-    if seen:
+    only = any(str(row[1][2]).endswith(ONLY) for row in rows)
+    if seen or only:
         print()
     if MEASURED in seen:
         print(f"{MEASURED} rate measured from actual traffic instead of estimate")
     if GUESSED in seen:
         print(f"{GUESSED} no cache price known, input price used for cache tokens")
+    if only:
+        print(f"{ONLY} suggested effort level is the only effort level available")
     for currency in sorted(missing):
         warn(f"no {base} rate for {currency}, shown unconverted")
     return 0
