@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-# Sync GTK3, Qt, Alacritty, Neovim and Mattermost with the GNOME color
-# scheme.
+# Sync GTK3, Qt, Alacritty, tmux, Codex, Neovim and Mattermost with the
+# GNOME color scheme.
 
 config_dir="${XDG_CONFIG_HOME:-$HOME/.config}"
 script="$(realpath "${BASH_SOURCE[0]}")"
@@ -9,7 +9,7 @@ unit_name="theme-sync.service"
 unit_file="${config_dir}/systemd/user/${unit_name}"
 
 # Things to sync, each has a sync_<name> function below.
-targets=(gtk qt alacritty neovim mattermost)
+targets=(gtk qt alacritty tmux codex neovim mattermost)
 
 # Print the current mode: dark or light.
 function get_mode() {
@@ -39,6 +39,19 @@ function sync_qt() {
 function sync_alacritty() {
   [[ -e ${config_dir}/alacritty/alacritty.toml ]] || return 0
   "${script%/*}/alacritty-theme.sh" set "$1"
+}
+
+# Give the tmux panes the Alacritty colors, for theme aware programs.
+function sync_tmux() {
+  command -v tmux > /dev/null || return 0
+  "${script%/*}/tmux-refresh.sh" set "$1"
+}
+
+# Restart Codex in the tmux panes, in the background, because it waits
+# for a busy Codex.
+function sync_codex() {
+  command -v codex > /dev/null && command -v tmux > /dev/null || return 0
+  "${script%/*}/codex-refresh.sh" &
 }
 
 # Set 'background' in each running Neovim through its server socket.
