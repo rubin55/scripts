@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
-# Sync GTK3, Qt, Alacritty and Neovim with the GNOME color scheme.
+# Sync GTK3, Qt, Alacritty, Neovim and Mattermost with the GNOME color
+# scheme.
 
 config_dir="${XDG_CONFIG_HOME:-$HOME/.config}"
 script="$(realpath "${BASH_SOURCE[0]}")"
@@ -8,7 +9,7 @@ unit_name="theme-sync.service"
 unit_file="${config_dir}/systemd/user/${unit_name}"
 
 # Things to sync, each has a sync_<name> function below.
-targets=(gtk qt alacritty neovim)
+targets=(gtk qt alacritty neovim mattermost)
 
 # Print the current mode: dark or light.
 function get_mode() {
@@ -49,6 +50,12 @@ function sync_neovim() {
     timeout 2 nvim --server "$socket" --remote-expr \
       "&background ==# '$1' ? '' : execute('set background=$1')" > /dev/null 2>&1
   done
+}
+
+# Set the theme on each server of Mattermost Desktop.
+function sync_mattermost() {
+  [[ -e ${config_dir}/Mattermost/config.json ]] || return 0
+  "${script%/*}/mattermost-theme.sh" set "$1"
 }
 
 # Sync all targets with the current mode.
