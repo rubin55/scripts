@@ -12,6 +12,7 @@ prompt_files=(
   .config/opencode/AGENTS.md
   .pi/agent/APPEND_SYSTEM.md
   .vibe/AGENTS.md
+  .config/zed/AGENTS.md
 )
 
 # Locations of skills directories.
