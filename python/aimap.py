@@ -1184,7 +1184,7 @@ def fmt_balance(value):
     return f"({value:.2f})" if value is not None else "(n/a)"
 
 
-def render(rows, headers, credits, use_color):
+def render(rows, headers, credits, use_color, total=""):
     # Rank on the printed value, so equal-looking prices from
     # providers that differ in the last decimals get one color.
     def extreme(shown, pos):
@@ -1252,8 +1252,8 @@ def render(rows, headers, credits, use_color):
         widths.append(max([len(header)] + [len(s[i]) for s in scores]))
 
     print("  ".join(h.ljust(widths[i]) for i, h in enumerate(headers)).rstrip())
-    if any(credits):
-        line = [" " * widths[0]]
+    if any(credits) or total:
+        line = [total.ljust(widths[0])]
         line += [text.rjust(widths[i + 1]) for i, text in enumerate(credits)]
         print(paint("  ".join(line).rstrip(), DIM, use_color))
     print("  ".join("-" * w for w in widths))
@@ -1446,9 +1446,12 @@ def main(argv=None):
         f"{paint('green', GREEN, use_color)} = lowest, "
         f"{paint('red', RED, use_color)} = highest\n"
     )
-    headers = ["model"] + [name for name, _, _ in results] + trail
+    headers = [os.path.basename(sys.argv[0])] + [name for name, _, _ in results] + trail
     credits = [fmt_balance(credit.get(name)) for name, _, _ in results]
-    seen = render(rows, headers, credits, use_color)
+    known = [credit.get(name) for name, _, _ in results]
+    known = [v for v in known if v is not None]
+    total = fmt_balance(sum(known)) if known else ""
+    seen = render(rows, headers, credits, use_color, total)
     only = any(str(row[1][2]).endswith(ONLY) for row in rows)
     if seen or only:
         print()
