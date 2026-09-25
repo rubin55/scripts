@@ -103,10 +103,12 @@ import glob
 import json
 import math
 import os
+import shutil
 import sqlite3
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -514,17 +516,23 @@ def firefox_cookie(spec):
         return None
     dbs = glob.glob(os.path.expanduser("~/.mozilla/firefox/*/cookies.sqlite"))
     for path in dbs:
-        try:
-            db = sqlite3.connect(f"file:{path}?mode=ro&immutable=1", uri=True)
+        # Firefox holds new cookies in the WAL, so read a copy of both.
+        with tempfile.TemporaryDirectory() as tmp:
+            copy = os.path.join(tmp, "cookies.sqlite")
             try:
-                row = db.execute(
-                    "select value from moz_cookies where host = ? and name = ?",
-                    (host, name),
-                ).fetchone()
-            finally:
-                db.close()
-        except sqlite3.Error:
-            continue
+                shutil.copy(path, copy)
+                if os.path.exists(path + "-wal"):
+                    shutil.copy(path + "-wal", copy + "-wal")
+                db = sqlite3.connect(copy)
+                try:
+                    row = db.execute(
+                        "select value from moz_cookies where host = ? and name = ?",
+                        (host, name),
+                    ).fetchone()
+                finally:
+                    db.close()
+            except (OSError, sqlite3.Error):
+                continue
         if row and row[0]:
             return row[0]
     return None
