@@ -30,23 +30,20 @@ serves one. A few known paths are tried and the first number that
 looks like a balance is kept, so most providers need no config. These
 are held for an hour, and refreshed by --update.
 
-A configured evaluator adds an int and a code column, holding its
-intelligence and coding index for the model. Where it rates the model
-at more than one effort level, a sel column shows the lowest level
-that keeps a share of the best int score, 95 percent unless --keep
-sets another. --effort shows int and code at a lower effort level,
-or the closest level below it that the evaluator rates. A model the
+A configured evaluator adds an int column, holding its intelligence
+index for the model. Where it rates the model at more than one effort
+level, a sel column shows the lowest level that keeps a share of the
+best int score, 95 percent unless --keep sets another. --effort shows
+int at a lower effort level, or the closest level below it that the
+evaluator rates. A model the
 evaluator rates at no named level keeps its one score, but only
 without --effort, as its score at a lower level is unknown.
 
 A provider set to pricing = "energy" bills the power its GPUs draw,
 not tokens, so its listed token prices are not what the account pays.
 Those models are priced from the provider's own usage api instead:
-requests are grouped per model into prompt-size bands, each band is
-reduced to its median, and cost = input * a + output * b is fitted
-over them, then scaled so it reproduces what was actually billed.
-Where the traffic cannot separate input from output the listed ratio
-is kept and only the level comes from the spend. Such cells carry a
+the listed input and output prices of a model are scaled so they
+reproduce what its requests were actually billed. Such cells carry a
 star. The whole spend lands on fresh tokens, so a cache hit adds
 nothing on top.
 
@@ -56,9 +53,8 @@ further back, a window at a time, until the history runs out.
 
 --sort name orders rows alphabetically, --sort price by the cheapest
 provider in each row, using the first number a cell shows. --sort int
-and --sort code put the highest score first, spelled out as
-intelligence and coding if you prefer. Without it rows keep the order
-of the config.
+puts the highest score first, spelled out as intelligence if you
+prefer. Without it rows keep the order of the config.
 
 Config format:
 
@@ -105,7 +101,6 @@ import math
 import os
 import shutil
 import sqlite3
-import statistics
 import subprocess
 import sys
 import tempfile
@@ -165,14 +160,8 @@ USAGE_RETRIES = 6
 # look like the start of history.
 USAGE_EMPTY_STOP = 2
 
-# Prompt sizes that split requests into bands, in tokens, and how much
-# traffic a fit needs before it is trusted.
-BANDS = [0, 500, 2000, 8000, 32000]
+# How much traffic a model needs before its spend sets its price.
 MIN_REQUESTS = 20
-MIN_ROWS = 3
-# Reject a fit whose output to input ratio is off the listed one by
-# more than this, which keeps a noisy window from inventing a split.
-RATIO_SPREAD = 4.0
 
 # Price fields seen in the wild, with the factor that turns them
 # into a price per million tokens. Order matters: per-million keys
@@ -204,26 +193,38 @@ def load_config(path):
         return tomllib.load(f)
 
 
-def get_json(url, timeout, token=None, user_agent=USER_AGENT, auth_header=None,
-             extra=None):
+def fetch_json(url, timeout, token=None, user_agent=USER_AGENT, auth_header=None,
+               extra=None, body=None, retries=1):
+    """GET, or POST when there is a body, waiting out a rate limit."""
     headers = {"Accept": "application/json", "User-Agent": user_agent}
     if token and auth_header and auth_header.lower() != "authorization":
         headers[auth_header] = token
     elif token:
         headers["Authorization"] = f"Bearer {token}"
     headers.update(extra or {})
-    req = urllib.request.Request(url, headers=headers, method="GET")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.load(resp), None
-    except urllib.error.HTTPError as e:
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode()
+        headers["Content-Type"] = "application/json"
+    for attempt in range(retries):
+        req = urllib.request.Request(url, data=data, headers=headers)
         try:
-            body = e.read().decode()[:120]
-        except (OSError, ValueError, UnicodeDecodeError):
-            body = ""
-        return None, f"HTTP {e.code} {body}".strip()
-    except (urllib.error.URLError, OSError, ValueError) as e:
-        return None, str(e)[:120]
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.load(resp), None
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < retries - 1:
+                delay = number(e.headers.get("Retry-After")) or 2**attempt
+                note(f"  rate limited, waiting {delay:.0f}s")
+                time.sleep(min(delay, 60))
+                continue
+            try:
+                text = e.read().decode()[:120]
+            except (OSError, ValueError, UnicodeDecodeError):
+                text = ""
+            return None, f"HTTP {e.code} {text}".strip()
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            return None, str(e)[:120]
+    return None, "rate limited"
 
 
 def tipi_secret(keys):
@@ -418,18 +419,39 @@ def cache_write(name, payload):
         warn(f"cannot cache {name}: {e}")
 
 
+def cached_json(name, url, timeout, max_age, valid, source=None):
+    """Cached payload, else fetched with the source's token and cached."""
+    payload = cache_read(name, max_age)
+    if valid(payload):
+        return payload, None
+    if not url:
+        return None, "no base_url"
+    source = source or {}
+    token, err = get_token(source)
+    if err:
+        return None, err
+    payload, err = fetch_json(
+        url,
+        timeout,
+        token,
+        str(source.get("user_agent") or USER_AGENT),
+        str(source.get("auth_header") or ""),
+    )
+    if err or not valid(payload):
+        return None, err or "unexpected response"
+    cache_write(name, payload)
+    note(f"{name}: fetched")
+    return payload, None
+
+
 def models_dev(timeout, max_age):
     """Curated catalog, used where a provider publishes no price."""
-    cached = cache_read("models-dev", max_age)
-    if isinstance(cached, dict):
-        return cached
-    payload, err = get_json(MODELS_DEV_URL, timeout)
-    if err or not isinstance(payload, dict):
-        warn(f"models.dev unavailable: {err or 'unexpected response'}")
-        return {}
-    cache_write("models-dev", payload)
-    note("models.dev: fetched")
-    return payload
+    payload, err = cached_json(
+        "models-dev", MODELS_DEV_URL, timeout, max_age, lambda p: isinstance(p, dict)
+    )
+    if err:
+        warn(f"models.dev unavailable: {err}")
+    return payload or {}
 
 
 def balance_of(payload):
@@ -454,27 +476,6 @@ def balance_of(payload):
     return None
 
 
-def post_json(url, obj, timeout, token=None):
-    """POST a json body and read a json reply."""
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "User-Agent": USER_AGENT,
-    }
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    req = urllib.request.Request(
-        url, data=json.dumps(obj).encode(), headers=headers, method="POST"
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.load(resp), None
-    except urllib.error.HTTPError as e:
-        return None, f"HTTP {e.code}"
-    except (urllib.error.URLError, OSError, ValueError) as e:
-        return None, str(e)[:120]
-
-
 def login_balance(provider, timeout):
     """Balance from a site login, for accounts with no key-auth api.
 
@@ -494,14 +495,14 @@ def login_balance(provider, timeout):
     field = str(provider.get("balance_field") or "credits")
     if not token_url or not account_url:
         return None
-    reply, err = post_json(
-        token_url, {"username": login[1], "password": password}, timeout
+    reply, err = fetch_json(
+        token_url, timeout, body={"username": login[1], "password": password}
     )
     token = reply.get("access") if isinstance(reply, dict) else None
     if err or not token:
         warn(f"{provider.get('name', '?')}: balance login failed: {err or 'no token'}")
         return None
-    payload, err = get_json(account_url, timeout, token)
+    payload, err = fetch_json(account_url, timeout, token)
     value = number(payload.get(field)) if isinstance(payload, dict) else None
     if not isinstance(payload, dict) or value is None:
         warn(f"{provider.get('name', '?')}: no {field} in account: {err or 'absent'}")
@@ -553,7 +554,7 @@ def cookie_balance(provider, timeout):
         return None
     headers = {"Cookie": f"{spec.partition('/')[2]}={cookie}"}
     headers.update(provider.get("balance_headers") or {})
-    payload, err = get_json(url, timeout, extra=headers)
+    payload, err = fetch_json(url, timeout, extra=headers)
     value = number(payload.get(field)) if isinstance(payload, dict) else None
     if value is None:
         warn(f"{name}: no {field} in balance: {err or 'login expired?'}")
@@ -580,7 +581,7 @@ def get_balance(provider, timeout, max_age):
             configured = provider.get("balance_path")
             paths = [str(configured)] if configured else BALANCE_PATHS
             for path in paths:
-                payload, err = get_json(
+                payload, err = fetch_json(
                     str(base_url).rstrip("/") + path,
                     timeout,
                     token,
@@ -616,29 +617,6 @@ def note(msg):
     print(msg, file=sys.stderr)
 
 
-def get_usage_page(url, token, timeout):
-    """One page of the usage api, waiting out a rate limit."""
-    headers = {
-        "Accept": "application/json",
-        "User-Agent": USER_AGENT,
-        "Authorization": f"Bearer {token}",
-    }
-    for attempt in range(USAGE_RETRIES):
-        req = urllib.request.Request(url, headers=headers, method="GET")
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return json.load(resp), None
-        except urllib.error.HTTPError as e:
-            if e.code != 429:
-                return None, f"HTTP {e.code}"
-            delay = number(e.headers.get("Retry-After")) or 2**attempt
-            note(f"  rate limited, waiting {delay:.0f}s")
-            time.sleep(min(delay, 60))
-        except (urllib.error.URLError, OSError, ValueError) as e:
-            return None, str(e)[:120]
-    return None, "rate limited"
-
-
 def fetch_window(base_url, path, token, start, end, timeout):
     """Every request the api lists in one window."""
     query = urllib.parse.urlencode(
@@ -654,7 +632,7 @@ def fetch_window(base_url, path, token, start, end, timeout):
         page = f"{url}?{query}"
         if cursor:
             page += "&cursor=" + urllib.parse.quote(cursor, safe="")
-        payload, err = get_usage_page(page, token, timeout)
+        payload, err = fetch_json(page, timeout, token, retries=USAGE_RETRIES)
         if err or not isinstance(payload, dict):
             return rows, accounting, err or "unexpected response"
         rows += payload.get("requests") or []
@@ -683,6 +661,11 @@ def update_usage(provider, cached, timeout):
     path = str(provider.get("usage_path") or USAGE_PATH)
     rows = {r["request_id"]: r for r in cached.get("requests", []) if "request_id" in r}
     accounting = cached.get("accounting_method")
+
+    def merge(found):
+        added = sum(1 for r in found if r.get("request_id") not in rows)
+        rows.update({r["request_id"]: r for r in found if "request_id" in r})
+        note(f"{name}: {len(found)} requests, {added} new")
     span = timedelta(days=USAGE_DAYS)
     now = datetime.now(timezone.utc)
 
@@ -699,9 +682,7 @@ def update_usage(provider, cached, timeout):
     if err:
         warn(f"{name}: usage api: {err}")
     accounting = method or accounting
-    added = sum(1 for r in fresh if r.get("request_id") not in rows)
-    rows.update({r["request_id"]: r for r in fresh if "request_id" in r})
-    note(f"{name}: {len(fresh)} requests, {added} new")
+    merge(fresh)
 
     # Backwards until the history runs out, picking up where a past
     # run stopped.
@@ -720,9 +701,7 @@ def update_usage(provider, cached, timeout):
             empty += 1
             continue
         empty = 0
-        added = sum(1 for r in older if r.get("request_id") not in rows)
-        rows.update({r["request_id"]: r for r in older if "request_id" in r})
-        note(f"{name}: {len(older)} requests, {added} new")
+        merge(older)
     complete = cached.get("complete") or empty >= USAGE_EMPTY_STOP
     if complete and not cached.get("complete"):
         note(f"{name}: reached the start of history")
@@ -750,7 +729,6 @@ def by_model(rows):
         cached = min(number(row.get("cached_tokens")) or 0, prompt)
         models.setdefault(name, []).append(
             {
-                "prompt": prompt,
                 # Cache hits skip the prefill, so they are not input.
                 "input": prompt - cached,
                 "output": output,
@@ -758,89 +736,6 @@ def by_model(rows):
             }
         )
     return models
-
-
-def aggregate(requests):
-    """Reduce each prompt size band to its median request.
-
-    Energy attribution swings by orders of magnitude between identical
-    requests depending on how busy the server was, with a long tail on
-    the high side. A median over the band averages that down.
-    """
-    bands = {}
-    for entry in requests:
-        edges = [e for e in BANDS if e <= entry["prompt"]]
-        if edges:
-            bands.setdefault(edges[-1], []).append(entry)
-    points = [
-        {
-            "input": statistics.median(e["input"] for e in group),
-            "output": statistics.median(e["output"] for e in group),
-            "cost": statistics.median(e["cost"] for e in group),
-            "requests": len(group),
-        }
-        for _, group in sorted(bands.items())
-    ]
-    # Thin bands are noise. Keep them only if nothing else is left.
-    return [p for p in points if p["requests"] >= MIN_ROWS] or points
-
-
-def fit_rates(points, listed):
-    """Fit cost = a * input + b * output over the bands.
-
-    Each band is divided by its token count, so long and short
-    requests count the same, then weighted by the square root of how
-    many requests it holds. Returns None when the bands do not cover a
-    range of mixes, when a rate is not above zero, or when the fitted
-    ratio is far off the listed one.
-    """
-    sii = sio = soo = sic = soc = 0.0
-    for p in points:
-        tokens = p["input"] + p["output"]
-        if not tokens:
-            continue
-        weight = math.sqrt(p["requests"])
-        x, y = p["input"] / tokens, p["output"] / tokens
-        cost = p["cost"] / tokens
-        sii += weight * x * x
-        sio += weight * x * y
-        soo += weight * y * y
-        sic += weight * x * cost
-        soc += weight * y * cost
-    det = sii * soo - sio * sio
-    if det <= 1e-12:
-        return None
-    low = (soo * sic - sio * soc) / det
-    high = (sii * soc - sio * sic) / det
-    if low <= 0 or high < 0:
-        return None
-    listed_in, listed_out = listed
-    if listed_in > 0 and listed_out > 0:
-        ratio = listed_out / listed_in
-        if not ratio / RATIO_SPREAD <= high / low <= ratio * RATIO_SPREAD:
-            return None
-    return low, high
-
-
-def analyse(requests, listed):
-    """Rates per million tokens that reproduce what was billed."""
-    listed_in, listed_out = listed
-    rates = fit_rates(aggregate(requests), listed)
-    method = "fit"
-    if rates is None:
-        # The traffic cannot tell input from output, so keep the
-        # listed ratio and let the spend set the level.
-        rates, method = (listed_in / 1e6, listed_out / 1e6), "listed ratio"
-    low, high = rates
-
-    spent = sum(e["cost"] for e in requests)
-    shaped = sum(low * e["input"] + high * e["output"] for e in requests)
-    if not shaped:
-        return listed_in, listed_out, method
-    # The bands give the ratio between the rates, the spend gives
-    # their level.
-    scale = spent / shaped
-    return low * scale * 1e6, high * scale * 1e6, method
 
 
 def measure(provider, listed, currency, timeout, update):
@@ -867,28 +762,24 @@ def measure(provider, listed, currency, timeout, update):
         # between input and output, so leave the model alone.
         if len(requests) < MIN_REQUESTS or not pair or not any(pair):
             continue
-        low, high, _ = analyse(requests, pair)
-        # The fit charges the whole spend to fresh input and output,
-        # so a cache hit carries nothing on top.
+        # The listed ratio splits the spend, the spend sets the level.
+        low, high = pair
+        spent = sum(e["cost"] for e in requests)
+        at_list = sum(low * e["input"] + high * e["output"] for e in requests) / 1e6
+        scale = spent / at_list if at_list else 1.0
+        # The whole spend lands on fresh input and output, so a cache
+        # hit carries nothing on top.
         for slug in slugs(model):
-            index[slug] = (low, high, 0.0, currency)
+            index[slug] = (low * scale, high * scale, 0.0, currency)
     return index
 
 
-def normalize(name):
-    """Match key for evaluators, which spell 5.1 as 5-1."""
-    return name.lower().replace(".", "-")
-
-
 def score_of(evaluations):
-    """Intelligence and coding index out of an evaluations object."""
-    intelligence = coding = None
+    """Intelligence index out of an evaluations object."""
     for key, value in evaluations.items():
-        if intelligence is None and key.endswith("intelligence_index"):
-            intelligence = number(value)
-        elif coding is None and key.endswith("coding_index"):
-            coding = number(value)
-    return intelligence, coding
+        if key.endswith("intelligence_index"):
+            return number(value)
+    return None
 
 
 def effort_of(name):
@@ -904,94 +795,72 @@ def suggest(levels, keep):
     """Lowest effort level that keeps keep percent of the best score."""
     if len(levels) == 1:
         return next(iter(levels)) + ONLY
-    floor = max(s[0] for s in levels.values()) * keep / 100
-    return next(e for e in EFFORTS if e in levels and levels[e][0] >= floor)
+    floor = max(levels.values()) * keep / 100
+    return next(e for e in EFFORTS if e in levels and levels[e] >= floor)
 
 
 def at_effort(levels, effort):
-    """Scores at this effort level, or the closest level below it."""
+    """Score at this effort level, or the closest level below it."""
     rated = [e for e in EFFORTS[: EFFORTS.index(effort) + 1] if e in levels]
-    return levels[rated[-1]] if rated else (None, None)
+    return levels[rated[-1]] if rated else None
 
 
 def evaluations(evaluators, timeout, max_age, keep, effort):
-    """Slug to (intelligence, coding, sel) from every evaluator."""
+    """Slug to (intelligence, sel) from every evaluator."""
     index, families = {}, {}
     for evaluator in evaluators:
         name = str(evaluator.get("name") or "evaluator")
-        payload = cache_read(name, max_age)
-        if not isinstance(payload, dict):
-            note(f"{name}: fetching evaluations")
-            base_url = evaluator.get("base_url")
-            if not base_url:
-                warn(f"{name}: no base_url")
-                continue
-            token, err = get_token(evaluator)
-            if err:
-                warn(f"{name}: {err}")
-                continue
-            payload, err = get_json(
-                str(base_url),
-                timeout,
-                token,
-                USER_AGENT,
-                str(evaluator.get("auth_header") or ""),
-            )
-            if (
-                err
-                or not isinstance(payload, dict)
-                or not isinstance(payload.get("data"), list)
-            ):
-                warn(f"{name}: {err or 'no data in response'}")
-                continue
-            cache_write(name, payload)
-            note(f"{name}: fetched")
-        for entry in payload.get("data") or []:
+        payload, err = cached_json(
+            name,
+            evaluator.get("base_url"),
+            timeout,
+            max_age,
+            lambda p: isinstance(p, dict) and isinstance(p.get("data"), list),
+            evaluator,
+        )
+        if not payload:
+            warn(f"{name}: {err}")
+            continue
+        for entry in payload["data"]:
             if not isinstance(entry, dict):
                 continue
             slug = entry.get("slug") or entry.get("id")
             scores = entry.get("evaluations")
             if not isinstance(slug, str) or not isinstance(scores, dict):
                 continue
-            slug = normalize(slug)
-            intelligence, coding = score_of(scores)
-            index.setdefault(slug, (intelligence, coding, None))
+            intelligence = score_of(scores)
+            index.setdefault(squash(slug), (intelligence, None))
             # Variants are named base-level, the top level just base.
             level = effort_of(str(entry.get("name") or ""))
             if level and intelligence is not None:
-                base = slug.removesuffix(f"-{level}")
+                base = squash(slug.lower().removesuffix(f"-{level}"))
                 levels = families.setdefault(base, {})
-                levels.setdefault(level, (intelligence, coding))
+                levels.setdefault(level, intelligence)
     for slug in index:
         if slug in families:
             levels = families[slug]
-            index[slug] = at_effort(levels, effort) + (suggest(levels, keep),)
+            index[slug] = at_effort(levels, effort), suggest(levels, keep)
         elif effort != EFFORTS[-1]:
             # No named levels, so the score at a lower effort is unknown.
-            index[slug] = (None, None, None)
+            index[slug] = (None, None)
     return index
 
 
 def fx_rates(base, timeout, max_age):
     """Reference rates per unit of base."""
-    cached = cache_read(f"fx-{base}", max_age)
-    if isinstance(cached, dict) and cached.get("rates"):
-        return cached["rates"]
-    payload, err = get_json(FX_URL.format(base), timeout)
-    if (
-        err
-        or not isinstance(payload, dict)
-        or not isinstance(payload.get("rates"), dict)
-    ):
-        warn(f"exchange rates unavailable: {err or 'no rates in response'}")
-        return {base: 1.0}
+    payload, err = cached_json(
+        f"fx-{base}",
+        FX_URL.format(base),
+        timeout,
+        max_age,
+        lambda p: isinstance(p, dict) and isinstance(p.get("rates"), dict),
+    )
+    if err:
+        warn(f"exchange rates unavailable: {err}")
     rates = {base: 1.0}
-    for code, value in payload["rates"].items():
-        rate = number(value)
-        if rate:
+    for code, value in (payload or {}).get("rates", {}).items():
+        if rate := number(value):
             rates[code.upper()] = rate
-    cache_write(f"fx-{base}", {"rates": rates})
-    note("exchange rates: fetched")
     return rates
 
 
@@ -1027,13 +896,6 @@ def split_number(text):
     return head, dot + tail
 
 
-def cell_span(size, mark_width):
-    """Visible width of a cell holding numbers of these widths."""
-    if not size:
-        return 0
-    return sum(sum(s) for s in size) + len(size) - 1 + mark_width
-
-
 def parse_ratio(text):
     """Weights from a ratio: 3:1 is input to output, 7:2:1 puts a
     cache hit share in front of it."""
@@ -1049,8 +911,6 @@ def parse_ratio(text):
 
 def field(text, width, color, use_color):
     """One number padded so its decimal point sits in place."""
-    if text is None:
-        return " " * (width[0] - 1) + paint("-", DIM, use_color) + " " * width[1]
     head, frac = split_number(text)
     left = " " * (width[0] - len(head))
     right = " " * (width[1] - len(frac))
@@ -1066,28 +926,16 @@ def collect(providers, timeout, max_age):
 
     def one(provider):
         name = provider.get("name", "?")
-        payload = cache_read(f"models-{name}", max_age)
-        if model_items(payload) is not None:
-            return name, index_models(payload), None
         base_url = provider.get("base_url")
-        if not base_url:
-            return name, {}, "no base_url"
-        token, err = get_token(provider)
-        if err:
-            return name, {}, err
-        payload, err = get_json(
-            str(base_url).rstrip("/") + "/models",
+        payload, err = cached_json(
+            f"models-{name}",
+            base_url and str(base_url).rstrip("/") + "/models",
             timeout,
-            token,
-            str(provider.get("user_agent") or USER_AGENT),
+            max_age,
+            lambda p: model_items(p) is not None,
+            provider,
         )
-        if err:
-            return name, {}, err
-        if model_items(payload) is None:
-            return name, {}, "no model list in response"
-        cache_write(f"models-{name}", payload)
-        note(f"{name}: models fetched")
-        return name, index_models(payload), None
+        return name, {} if err else index_models(payload), err
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         return list(pool.map(one, providers))
@@ -1126,8 +974,8 @@ def build_rows(
         ordered += [str(a).lower() for a in model.get("aliases", [])]
         names = set(ordered) | {squash(n) for n in ordered}
         rated = next(
-            (scores[key] for key in map(normalize, ordered) if key in scores),
-            (None, None, None),
+            (scores[key] for key in map(squash, ordered) if key in scores),
+            (None, None),
         )
         cells = []
         for provider, index, err in results:
@@ -1155,9 +1003,6 @@ def build_rows(
     return rows
 
 
-SORT_KEYS = {"int": 0, "intelligence": 0, "code": 1, "coding": 1}
-
-
 def sort_rows(rows, order):
     """Order rows by name, cheapest price, or an evaluator score."""
     if order == "name":
@@ -1169,11 +1014,10 @@ def sort_rows(rows, order):
             return min(prices) if prices else float("inf"), row[0]
 
         return sorted(rows, key=cheapest)
-    if order in SORT_KEYS:
-        half = SORT_KEYS[order]
+    if order in ("int", "intelligence"):
 
         def rated(row):
-            score = row[1][half]
+            score = row[1][0]
             return -score if score is not None else float("inf"), row[0]
 
         return sorted(rows, key=rated)
@@ -1185,39 +1029,30 @@ def fmt_balance(value):
 
 
 def render(rows, headers, credits, use_color, total=""):
-    # Rank on the printed value, so equal-looking prices from
-    # providers that differ in the last decimals get one color.
-    def extreme(shown, pos):
-        values = [s[pos] for s in shown if s and s[pos] is not None]
-        if len(set(values)) < 2:
-            return None, None
-        return min(values), max(values)
-
+    """Print the table and return the marks it used."""
     labels = {"absent": "-", "unknown": "n/a", "err": "err"}
+    # A cell is a label, or the printed text of each of its prices.
+    grid = [
+        [
+            [None if v is None else fmt(v) for v in price]
+            if state == "ok"
+            else labels[state]
+            for state, price, _ in cells
+        ]
+        for _, _, cells in rows
+    ]
     # Score columns trail the providers. They are one fact per model,
     # so they take no part in the ranking.
-    trail = len(headers) - 1 - len(rows[0][2]) if rows else 0
-    printed, ranked, scores = [], [], []
-    for _, rated, cells in rows:
-        texts, shown = [], []
-        for state, price, mark in cells:
-            if state != "ok":
-                texts.append((labels[state], ""))
-                shown.append(None)
-                continue
-            values = tuple(None if v is None else fmt(v) for v in price)
-            texts.append((values, mark))
-            shown.append(tuple(None if v is None else float(v) for v in values))
-        printed.append(texts)
-        ranked.append(shown)
-        scores.append(
-            [
-                "-" if v is None else v if isinstance(v, str) else f"{v:.1f}"
-                for v in rated[:trail]
-            ]
-        )
+    trail = headers[1 + len(credits) :]
+    scores = [
+        [
+            "-" if v is None else v if isinstance(v, str) else f"{v:.1f}"
+            for v in rated[: len(trail)]
+        ]
+        for _, rated, _ in rows
+    ]
     # Leave room for a mark, so the words align on their last letter.
-    for i in range(trail):
+    for i in range(len(trail)):
         if any(s[i].endswith(ONLY) for s in scores):
             for s in scores:
                 s[i] += "" if s[i].endswith(ONLY) else " "
@@ -1225,65 +1060,61 @@ def render(rows, headers, credits, use_color, total=""):
     # Per column, how wide each number is on either side of its
     # decimal point, plus room for the marks. A number nothing in
     # the column states, such as a cache price, takes no space.
-    parts = []
+    layout = []
     widths = [max([len(headers[0])] + [len(row[0]) for row in rows])]
-    for i in range(len(headers) - 1 - trail):
-        size, mark_width, label = [], 0, 0
-        for texts in printed:
-            cell, mark = texts[i]
-            if isinstance(cell, str):
-                label = max(label, len(cell))
-                continue
-            while len(size) < len(cell):
-                size.append([0, 0])
-            for half, text in enumerate(cell):
-                if text is None:
-                    continue
-                head, frac = split_number(text)
-                size[half][0] = max(size[half][0], len(head))
-                size[half][1] = max(size[half][1], len(frac))
-            mark_width = max(mark_width, len(mark))
-        size = [s for s in size if s[0]]
-        parts.append((size, mark_width))
-        span = max(len(headers[i + 1]), cell_span(size, mark_width), label)
-        widths.append(max(span, len(credits[i])))
-    for i in range(trail):
-        header = headers[len(headers) - trail + i]
+    for i, credit in enumerate(credits):
+        column = [cells[i] for cells in grid]
+        numbers = [c for c in column if isinstance(c, list)]
+        size = []
+        for j in range(max(map(len, numbers), default=0)):
+            parts = [split_number(n[j]) for n in numbers if n[j]]
+            if parts:
+                size.append([max(len(p[k]) for p in parts) for k in (0, 1)])
+        mark_width = max((len(row[2][i][2]) for row in rows), default=0)
+        span = sum(map(sum, size)) + len(size) - 1 + mark_width if size else 0
+        layout.append((size, mark_width, span))
+        label = max((len(c) for c in column if isinstance(c, str)), default=0)
+        widths.append(max(len(headers[i + 1]), span, label, len(credit)))
+    for i, header in enumerate(trail):
         widths.append(max([len(header)] + [len(s[i]) for s in scores]))
 
-    print("  ".join(h.ljust(widths[i]) for i, h in enumerate(headers)).rstrip())
+    print("  ".join(h.ljust(w) for h, w in zip(headers, widths)).rstrip())
     if any(credits) or total:
         line = [total.ljust(widths[0])]
-        line += [text.rjust(widths[i + 1]) for i, text in enumerate(credits)]
+        line += [text.rjust(w) for text, w in zip(credits, widths[1:])]
         print(paint("  ".join(line).rstrip(), DIM, use_color))
     print("  ".join("-" * w for w in widths))
 
     seen = set()
-    for row, texts, shown, rated in zip(rows, printed, ranked, scores):
-        count = max((len(s) for s in shown if s), default=0)
-        extremes = [extreme(shown, j) for j in range(count)]
+    for row, cells, rated in zip(rows, grid, scores):
+        # Rank on the printed value, so equal-looking prices from
+        # providers that differ in the last decimals get one color.
+        numbers = [c for c in cells if isinstance(c, list)]
+        extremes = []
+        for j in range(max(map(len, numbers), default=0)):
+            values = {float(t) for n in numbers if (t := n[j])}
+            ends = (min(values), max(values)) if len(values) > 1 else (None, None)
+            extremes.append(ends)
         out = [row[0].ljust(widths[0])]
-        for i, (cell, mark) in enumerate(texts):
-            width = widths[i + 1]
+        for cell, (*_, mark), (size, mark_width, span), width in zip(
+            cells, row[2], layout, widths[1:]
+        ):
             if isinstance(cell, str):
                 out.append(paint(cell, DIM, use_color) + " " * (width - len(cell)))
                 continue
-            size, mark_width = parts[i]
             fields = []
-            for j in range(len(size)):
-                low, high = extremes[j]
-                value = shown[i][j]
+            for text, part, (low, high) in zip(cell, size, extremes):
+                if text is None:
+                    fields.append(field("-", part, DIM, use_color))
+                    continue
+                value = float(text)
                 color = GREEN if value == low else RED if value == high else None
-                fields.append(field(cell[j], size[j], color, use_color))
-            text = (
-                " ".join(fields)
-                + paint(mark, DIM, use_color)
-                + " " * (mark_width - len(mark))
-            )
-            seen.update(set(mark))
-            out.append(text + " " * (width - cell_span(size, mark_width)))
-        for i, text in enumerate(rated):
-            cell = text.rjust(widths[len(widths) - trail + i])
+                fields.append(field(text, part, color, use_color))
+            seen.update(mark)
+            pad = " " * (mark_width - len(mark) + width - span)
+            out.append(" ".join(fields) + paint(mark, DIM, use_color) + pad)
+        for text, width in zip(rated, widths[1 + len(credits) :]):
+            cell = text.rjust(width)
             out.append(paint(cell, DIM, use_color) if text.strip() == "-" else cell)
         print("  ".join(out).rstrip())
     return seen
@@ -1308,9 +1139,9 @@ def main(argv=None):
     ap.add_argument(
         "-s",
         "--sort",
-        choices=("name", "price", "int", "intelligence", "code", "coding"),
+        choices=("name", "price", "int", "intelligence"),
         metavar="KEY",
-        help="order rows by name, price, int or code; default config order",
+        help="order rows by name, price or int; default config order",
     )
     ap.add_argument(
         "-e",
@@ -1318,7 +1149,7 @@ def main(argv=None):
         choices=EFFORTS,
         default="max",
         metavar="LEVEL",
-        help=f"effort level of the int and code scores, {', '.join(EFFORTS)}; "
+        help=f"effort level of the int score, {', '.join(EFFORTS)}; "
         "default max",
     )
     ap.add_argument(
@@ -1421,7 +1252,7 @@ def main(argv=None):
         args.sort,
     )
     use_color = not args.no_color and sys.stdout.isatty()
-    trail = ["int", "code", "sel"] if scores else []
+    trail = ["int", "sel"] if scores else []
 
     if weights:
         mix = "cache, input, output" if len(weights) == 3 else "input, output"
@@ -1435,7 +1266,7 @@ def main(argv=None):
     print(f"prices per million tokens in {base} ({shape})")
     if scores:
         print(
-            f"int and code are at effort level {args.effort}, "
+            f"int is at effort level {args.effort}, "
             "or the closest level below it"
         )
         print(
@@ -1452,7 +1283,7 @@ def main(argv=None):
     known = [v for v in known if v is not None]
     total = fmt_balance(sum(known)) if known else ""
     seen = render(rows, headers, credits, use_color, total)
-    only = any(str(row[1][2]).endswith(ONLY) for row in rows)
+    only = any(str(row[1][1]).endswith(ONLY) for row in rows)
     if seen or only:
         print()
     if MEASURED in seen:
