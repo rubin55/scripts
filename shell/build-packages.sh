@@ -29,7 +29,7 @@ filter() {
   for g in "${groups[@]}"; do filter.group "$g" <<< "$input"; done | awk '!seen[$0]++'
 }
 
-# Named filter groups. Add your own here and to $known_groups.
+# Named groups (add new ones to $known_groups), or a package name.
 filter.group() {
   case "$1" in
     all)      grep -vE -- 'broken/' ;;
@@ -42,6 +42,7 @@ filter.group() {
     custom)   grep -vE -- 'broken/|chromium|llama.cpp-vulkan|llama.cpp-cuda|gguf|nvidia|cuda|linux-tachyon|sunshine' | grep -E -- 'custom/' ;;
     others)   grep -vE -- 'broken/|chromium|llama.cpp-vulkan|llama.cpp-cuda|gguf|nvidia|cuda|linux-tachyon|sunshine' | grep -E -- 'others/' ;;
     mine)     grep -vE -- 'broken/|chromium|llama.cpp-vulkan|llama.cpp-cuda|gguf|nvidia|cuda|linux-tachyon|sunshine' | grep -E -- 'mine/' ;;
+    *)        awk -F/ -v n="$1" '$NF == n' ;;
   esac
 }
 
@@ -110,27 +111,40 @@ report.times() {
 
 # Show how to call this script and exit with the given status.
 usage() {
-  echo "usage: $0 <group> [group...]"
+  echo "usage: $0 <group|package|file> [...]"
   echo "groups: ${known_groups// /, }"
+  echo "a file lists one package name or path per line"
   exit "$1"
 }
 
 # Script starts execution here.
 [[ $# -eq 0 ]] && usage 0
-for g in "$@"; do
-  [[ " $known_groups " == *" $g "* ]] || { log.error "Unknown group '$g'."; usage 1; }
+
+all=$(git-dirlist.sh "$build_dir" 2>/dev/null | sort -u)
+known="$known_groups $(list.names <<< "$all")"
+
+# Replace each file with the package names it lists.
+groups=()
+for a in "$@"; do
+  if [[ -f $a ]]; then
+    mapfile -t -O "${#groups[@]}" groups < <(sed 's|.*/||; /^$/d' "$a")
+  else
+    groups+=("$a")
+  fi
 done
 
-groups=("$@")
-group=$(IFS=+; echo "${groups[*]}")
+for g in "${groups[@]}"; do
+  [[ " $known " == *" $g "* ]] || { log.error "Unknown group or package '$g'."; usage 1; }
+done
+
+args=("${@##*/}")
+group=$(IFS=+; echo "${args[*]}")
 label=""
-for g in "${groups[@]}"; do label+="${label:+, }${g^}"; done
+for g in "${args[@]}"; do label+="${label:+, }${g^}"; done
 
 list_file="/tmp/build-packages.$group.list"
 list_read="$list_file.read"
 time_file="/tmp/build-packages.$group.times"
-
-all=$(git-dirlist.sh "$build_dir" 2>/dev/null | sort -u)
 
 # Both files survive an interrupted run, so a later one can resume.
 if [[ ! -s "$list_file" ]]; then
@@ -142,7 +156,7 @@ cp "$list_file" "$list_read"
 
 c=$(wc -l < "$list_read")
 if (( c == 0 )); then
-  log.error "No packages to build for '${groups[*]}'."
+  log.error "No packages to build for '$*'."
   rm -f "$list_read"
   exit 1
 fi
@@ -178,7 +192,7 @@ while IFS= read -r p <&3 || [[ -n "$p" ]]; do
     title.line
     log.error "An error occurred in package \"$(basename "$p")\"."
     log.error "Go to \"$p/PKGBUILD\" and fix it."
-    log.error "After that you can restart with: $0 ${groups[*]}"
+    log.error "After that you can restart with: $0 $*"
     failed=1
     break
   fi
