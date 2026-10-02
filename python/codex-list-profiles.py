@@ -12,7 +12,7 @@ for path in sorted(codex_dir.glob("*.config.toml")):
     with open(path, "rb") as file:
         data = tomllib.load(file)
     provider = data.get("model_provider", "-")
-    model = data.get("model", "-")
+    model = data.get("model", "-").rsplit("/", 1)[-1]
     effort = data.get("model_reasoning_effort", "-")
     rows.append([profile, provider, model, effort])
 
