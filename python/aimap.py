@@ -9,7 +9,10 @@ lowest price is green, the highest red.
 Some providers serve a model without publishing its price, and many
 state no cache price at all. Those fall back to what models.dev holds
 for that same provider. A model with no price in either source shows
-as n/a, a missing cache price as a dash.
+as n/a. A cache price missing from both is estimated from the
+evaluator: the share of the input price its cache hit costs, applied
+to the input price of the provider. Such cells carry a tilde. With no
+estimate either, a missing cache price shows as a dash.
 
 Prices are converted to one currency using reference rates from
 frankfurter.dev. Model lists, the models.dev catalog and the rates are
@@ -81,7 +84,7 @@ Config format:
 
   [[model_evaluators]]
   name = "artificial-analysis"                       # also the cache file
-  base_url = "https://artificialanalysis.ai/api/v2/data/llms/models"
+  base_url = "https://artificialanalysis.ai/api/v2/language/models/free"
   auth_keys = ["artificialanalysis", "default-api-token"]
   auth_header = "x-api-key"   # optional, default is Authorization
 
@@ -167,6 +170,7 @@ MIN_REQUESTS = 20
 # into a price per million tokens. Order matters: per-million keys
 # come first, since some providers publish both forms.
 PRICE_KEYS = [
+    ("price_1m_input_tokens", "price_1m_output_tokens", 1.0),
     ("input_per_million", "output_per_million", 1.0),
     ("prompt_per_million", "completion_per_million", 1.0),
     ("input_token", "output_token", 1.0),
@@ -177,6 +181,7 @@ PRICE_KEYS = [
 # Cache read fields, searched on their own because a provider can
 # state the pair per million and the cache price per token.
 CACHE_KEYS = [
+    ("price_1m_cache_hit_tokens", 1.0),
     ("cached_input_per_million", 1.0),
     ("cache_read_cost", 1.0),
     ("cache_read_input_token_cost", 1e6),
@@ -225,6 +230,19 @@ def fetch_json(url, timeout, token=None, user_agent=USER_AGENT, auth_header=None
         except (urllib.error.URLError, OSError, ValueError) as e:
             return None, str(e)[:120]
     return None, "rate limited"
+
+
+def fetch_pages(url, timeout, *args):
+    """GET a reply served in pages, with the data of every page joined."""
+    payload, err = fetch_json(url, timeout, *args)
+    if not isinstance(payload, dict):
+        return payload, err
+    for n in range(2, payload.get("pagination", {}).get("total_pages", 1) + 1):
+        page, err = fetch_json(f"{url}?page={n}", timeout, *args)
+        if not isinstance(page, dict):
+            return None, err or "unexpected response"
+        payload["data"] += page.get("data") or []
+    return payload, None
 
 
 def tipi_secret(keys):
@@ -419,7 +437,7 @@ def cache_write(name, payload):
         warn(f"cannot cache {name}: {e}")
 
 
-def cached_json(name, url, timeout, max_age, valid, source=None):
+def cached_json(name, url, timeout, max_age, valid, source=None, fetch=fetch_json):
     """Cached payload, else fetched with the source's token and cached."""
     payload = cache_read(name, max_age)
     if valid(payload):
@@ -430,7 +448,7 @@ def cached_json(name, url, timeout, max_age, valid, source=None):
     token, err = get_token(source)
     if err:
         return None, err
-    payload, err = fetch_json(
+    payload, err = fetch(
         url,
         timeout,
         token,
@@ -806,8 +824,9 @@ def at_effort(levels, effort):
 
 
 def evaluations(evaluators, timeout, max_age, keep, effort):
-    """Slug to (intelligence, sel) from every evaluator."""
-    index, families = {}, {}
+    """Slug to (intelligence, sel), and slug to the share of the input
+    price a cache hit costs, from every evaluator."""
+    index, families, shares = {}, {}, {}
     for evaluator in evaluators:
         name = str(evaluator.get("name") or "evaluator")
         payload, err = cached_json(
@@ -817,6 +836,7 @@ def evaluations(evaluators, timeout, max_age, keep, effort):
             max_age,
             lambda p: isinstance(p, dict) and isinstance(p.get("data"), list),
             evaluator,
+            fetch_pages,
         )
         if not payload:
             warn(f"{name}: {err}")
@@ -830,6 +850,10 @@ def evaluations(evaluators, timeout, max_age, keep, effort):
                 continue
             intelligence = score_of(scores)
             index.setdefault(squash(slug), (intelligence, None))
+            # A zero cache price next to a paid input is a placeholder.
+            price = price_of(entry)
+            if price and price[0] > 0 and price[2]:
+                shares.setdefault(squash(slug), price[2] / price[0])
             # Variants are named base-level, the top level just base.
             level = effort_of(str(entry.get("name") or ""))
             if level and intelligence is not None:
@@ -843,7 +867,7 @@ def evaluations(evaluators, timeout, max_age, keep, effort):
         elif effort != EFFORTS[-1]:
             # No named levels, so the score at a lower effort is unknown.
             index[slug] = (None, None)
-    return index
+    return index, shares
 
 
 def fx_rates(base, timeout, max_age):
@@ -885,7 +909,8 @@ def blend(value, weights):
 
 
 def fmt(value):
-    if 0 < value < 0.01:
+    # A third decimal only where two would print as 0.00.
+    if 0 < value < 0.005:
         return f"{value:.3f}"
     return f"{value:.2f}"
 
@@ -962,7 +987,8 @@ def listed_currency(index):
 
 
 def build_rows(
-    models, results, catalogs, scores, measured, base, rates, missing, weights=None
+    models, results, catalogs, scores, shares, measured, base, rates, missing,
+    weights=None,
 ):
     """One row per model, with its scores and a cell per provider."""
     rows = []
@@ -977,6 +1003,7 @@ def build_rows(
             (scores[key] for key in map(squash, ordered) if key in scores),
             (None, None),
         )
+        share = next((shares[k] for k in map(squash, ordered) if k in shares), None)
         cells = []
         for provider, index, err in results:
             if err:
@@ -993,6 +1020,9 @@ def build_rows(
             mark = ""
             if hits:
                 price, mark = min(hits, key=lambda p: (p[0], p[1])), MEASURED
+            if price[2] is None and share is not None:
+                price = (price[0], price[1], price[0] * share, price[3])
+                mark += GUESSED
             value = convert(price, base, rates, missing)
             if weights:
                 blended, guessed = blend(value, weights)
@@ -1216,10 +1246,10 @@ def main(argv=None):
         )
         for p in providers
     }
-    scores = (
+    scores, shares = (
         evaluations(evaluators, args.timeout, max_age, args.keep, args.effort)
         if evaluators
-        else {}
+        else ({}, {})
     )
     credit = balances(
         providers, args.timeout, 0 if args.update else BALANCE_TTL, base, rates
@@ -1247,7 +1277,8 @@ def main(argv=None):
     missing = set()
     rows = sort_rows(
         build_rows(
-            models, results, catalogs, scores, measured, base, rates, missing, weights
+            models, results, catalogs, scores, shares, measured, base, rates,
+            missing, weights,
         ),
         args.sort,
     )
@@ -1289,7 +1320,7 @@ def main(argv=None):
     if MEASURED in seen:
         print(f"{MEASURED} rate measured from actual traffic instead of estimate")
     if GUESSED in seen:
-        print(f"{GUESSED} no cache price known, input price used for cache tokens")
+        print(f"{GUESSED} no cache price listed, estimated from aa, else input price")
     if only:
         print(f"{ONLY} suggested effort level is the only effort level aa tested")
     for currency in sorted(missing):
