@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # My prompt and skills location(s).
-my_prompt="$HOME/Documents/Rubin/Notes/custom-user-prompt.md"
+my_prompt="$HOME/Documents/Rubin/Notes/user-prompt.md"
 my_skills="$HOME/Documents/Rubin/Skills"
 
 # System prompt addition files.
