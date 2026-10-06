@@ -334,7 +334,7 @@ def catalogs_list(args):
     return 0
 
 
-def catalogs_generate(args):
+def catalogs_update(args):
     providers = {}
     for path in config_paths():
         for key, info in load_toml(path).get("model_providers", {}).items():
@@ -569,7 +569,7 @@ def main(argv=None):
     cmd.add_argument("--dir", default=catalogs_dir)
     cmd.set_defaults(func=catalogs_list)
     cmd = catalogs.add_parser(
-        "generate", help="generate model catalogs from configured providers"
+        "update", help="update model catalogs from configured providers"
     )
     cmd.add_argument("--dir", default=catalogs_dir)
     cmd.add_argument(
@@ -585,7 +585,7 @@ def main(argv=None):
         "--dry-run", action="store_true", help="fetch and translate, do not write files"
     )
     cmd.add_argument("--quiet", action="store_true")
-    cmd.set_defaults(func=catalogs_generate)
+    cmd.set_defaults(func=catalogs_update)
 
     profiles = group("profiles", "profile config files")
     profiles.add_parser("list", help="list profiles").set_defaults(func=profiles_list)
