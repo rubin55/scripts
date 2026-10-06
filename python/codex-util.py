@@ -11,6 +11,7 @@ import tempfile
 import tomllib
 import urllib.error
 import urllib.request
+from itertools import pairwise
 from pathlib import Path
 
 
@@ -397,6 +398,64 @@ def profiles_list(args):
     return 0
 
 
+def profile_providers():
+    # Map each profile config to the model provider it uses.
+    return {path: load_toml(path).get("model_provider") for path in profile_paths()}
+
+
+def provider_profile(provider):
+    # Return the one profile config that uses the provider.
+    paths = [path for path, p in profile_providers().items() if p == provider]
+    if len(paths) != 1:
+        raise ValueError(f"{len(paths)} profiles use provider {provider!r}")
+    return paths[0]
+
+
+def catalog_efforts(path):
+    # Map each model in the catalog of a profile to its effort levels.
+    data = load_toml(path)
+    catalog = data.get("model_catalog_json") or (
+        codex_home() / "model-catalogs" / f"{data.get('model_provider')}.json"
+    )
+    return {
+        m["slug"]: [r["effort"] for r in m.get("supported_reasoning_levels") or []]
+        or list(EFFORT_DESCRIPTIONS)
+        for m in read_models(catalog)
+    }
+
+
+def set_keys(text, values):
+    # Set top-level keys, which come before the first table header.
+    head, *tail = re.split(r"^(?=\[)", text, maxsplit=1, flags=re.MULTILINE)
+    for key, value in values.items():
+        line = f"{key} = {json.dumps(value)}"
+        head, count = re.subn(
+            rf"^{key}\s*=.*$",
+            lambda _, line=line: line,
+            head,
+            count=1,
+            flags=re.MULTILINE,
+        )
+        if not count:
+            head = f"{line}\n{head}"
+    return "".join([head, *tail])
+
+
+def profiles_set(args):
+    path = provider_profile(args.provider)
+    efforts = catalog_efforts(path)
+    if args.model not in efforts:
+        raise ValueError(f"model {args.model!r} not in the {args.provider} catalog")
+    if args.effort not in efforts[args.model]:
+        raise ValueError(f"effort must be one of: {' '.join(efforts[args.model])}")
+    values = {"model": args.model, "model_reasoning_effort": args.effort}
+    text = set_keys(path.read_text(), values)
+    tomllib.loads(text)
+    write_file(path, text)
+    print(f"wrote {path}")
+    return 0
+
+
 # Trust roots
 
 TRUST_BLOCK = re.compile(
@@ -508,12 +567,22 @@ def trust_purge(args):
 # Completion
 #
 # The case patterns match the words before the cursor. Deeper commands
-# come first, so the first match is the most specific one.
+# come first, so the first match is the most specific one. Values for
+# --provider, --model and --effort come from "completion LINE".
 
 BASH_COMPLETION = """\
 _codex_util() {
     local cur=${COMP_WORDS[COMP_CWORD]} prev=${COMP_WORDS[COMP_CWORD-1]}
-    local path="" word words
+    local line=${COMP_LINE:0:COMP_POINT} path="" word words
+    local re=' (--provider|--model|--effort) +([^ ]*)$'
+    if [[ $line =~ $re ]]; then
+        local value=${BASH_REMATCH[2]}
+        words=$(%(prog)s completion "$line" 2>/dev/null)
+        COMPREPLY=($(compgen -W "$words" -- "$value"))
+        # Bash splits cur at COMP_WORDBREAKS, so remove the text before it.
+        COMPREPLY=("${COMPREPLY[@]#"${value%%"$cur"}"}")
+        return
+    fi
     case $prev in
         %(value_options)s) compopt -o default; COMPREPLY=(); return ;;
     esac
@@ -553,6 +622,28 @@ def bash_completion(parser):
     }
 
 
+def option_values(line):
+    # Return the values for the option before the last word of line.
+    words = line.split()
+    if not line[-1:].isspace():
+        words.pop()
+    opts = dict(pairwise(words))
+    if words[-1] == "--provider":
+        return sorted({p for p in profile_providers().values() if p})
+    efforts = catalog_efforts(provider_profile(opts.get("--provider")))
+    if words[-1] == "--model":
+        return list(efforts)
+    return efforts.get(opts.get("--model"), [])
+
+
+def completion(parser, line):
+    if line is None:
+        print(bash_completion(parser), end="")
+    else:
+        print(*option_values(line), sep="\n")
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.set_defaults(func=lambda _: parser.print_help())
@@ -589,6 +680,13 @@ def main(argv=None):
 
     profiles = group("profiles", "profile config files")
     profiles.add_parser("list", help="list profiles").set_defaults(func=profiles_list)
+    cmd = profiles.add_parser(
+        "set", help="set the model and effort of the profile that uses a provider"
+    )
+    cmd.add_argument("--provider", required=True)
+    cmd.add_argument("--model", required=True, help="a model in the provider catalog")
+    cmd.add_argument("--effort", required=True, help="an effort level of the model")
+    cmd.set_defaults(func=profiles_set)
 
     trust = group("trust-roots", "project trust entries")
     trust.add_parser(
@@ -610,9 +708,11 @@ def main(argv=None):
         "purge", help="remove all trust roots from the main and profile configs"
     ).set_defaults(func=trust_purge)
 
-    groups.add_parser("completion", help="print a bash completion script").set_defaults(
-        func=lambda _: print(bash_completion(parser), end="")
+    cmd = groups.add_parser("completion", help="print a bash completion script")
+    cmd.add_argument(
+        "line", nargs="?", help="print the values for the option at the end of LINE"
     )
+    cmd.set_defaults(func=lambda args: completion(parser, args.line))
 
     args = parser.parse_args(argv)
     try:
