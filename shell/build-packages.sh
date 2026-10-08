@@ -33,7 +33,7 @@ filter() {
 filter.group() {
   case "$1" in
     all)      grep -vE -- 'broken/' ;;
-    regular)  grep -vE -- 'broken/|chromium|linux-tachyon|sunshine|-git|-hg' ;;
+    regular)  grep -vE -- 'broken/|chromium|nvidia|cuda|linux-tachyon|sunshine|-git|-hg' ;;
     devel)    grep -vE -- 'broken/|chromium|llama.cpp-vulkan|llama.cpp-cuda|gguf|nvidia|cuda|linux-tachyon|sunshine' | grep -E -- '-git|-hg' ;;
     linux)    grep -vE -- 'broken/|chromium|llama.cpp-vulkan|llama.cpp-cuda|gguf|nvidia|cuda|sunshine'               | grep -E -- 'linux-tachyon' ;;
     llama)    grep -vE -- 'broken/|chromium|nvidia|cuda|linux-tachyon|sunshine' | sort -r                            | grep -E -- 'llama.cpp-vulkan|llama.cpp-cuda|gguf' ;;
