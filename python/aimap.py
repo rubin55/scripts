@@ -4,7 +4,7 @@
 Reads ~/.aimap.toml, fetches <base_url>/models from every provider
 using a token from tipi.py, and prints one column per provider with
 the price per million tokens of each configured model. Per row the
-lowest price is green, the highest red.
+lowest price is green, the highest red. A free price is blue.
 
 Some providers serve a model without publishing its price, and many
 state no cache price at all. Those fall back to what models.dev holds
@@ -146,6 +146,7 @@ DEFAULT_KEEP = 95.0
 RESET = "\033[0m"
 RED = "\033[31m"
 GREEN = "\033[32m"
+BLUE = "\033[34m"
 DIM = "\033[2m"
 GUESSED = "~"
 MEASURED = "*"
@@ -1041,6 +1042,8 @@ def sort_rows(rows, order):
 
         def cheapest(row):
             prices = [cell[1][0] for cell in row[2] if cell[0] == "ok"]
+            # Free prices count only when there is nothing else.
+            prices = [p for p in prices if p > 0] or prices
             return min(prices) if prices else float("inf"), row[0]
 
         return sorted(rows, key=cheapest)
@@ -1119,10 +1122,11 @@ def render(rows, headers, credits, use_color, total=""):
     for row, cells, rated in zip(rows, grid, scores):
         # Rank on the printed value, so equal-looking prices from
         # providers that differ in the last decimals get one color.
+        # Free prices are left out of the ranking.
         numbers = [c for c in cells if isinstance(c, list)]
         extremes = []
         for j in range(max(map(len, numbers), default=0)):
-            values = {float(t) for n in numbers if (t := n[j])}
+            values = {float(t) for n in numbers if (t := n[j])} - {0.0}
             ends = (min(values), max(values)) if len(values) > 1 else (None, None)
             extremes.append(ends)
         out = [row[0].ljust(widths[0])]
@@ -1138,7 +1142,10 @@ def render(rows, headers, credits, use_color, total=""):
                     fields.append(field("-", part, DIM, use_color))
                     continue
                 value = float(text)
-                color = GREEN if value == low else RED if value == high else None
+                if value == 0:
+                    color = BLUE
+                else:
+                    color = GREEN if value == low else RED if value == high else None
                 fields.append(field(text, part, color, use_color))
             seen.update(mark)
             pad = " " * (mark_width - len(mark) + width - span)
@@ -1306,7 +1313,8 @@ def main(argv=None):
         )
     print(
         f"{paint('green', GREEN, use_color)} = lowest, "
-        f"{paint('red', RED, use_color)} = highest\n"
+        f"{paint('red', RED, use_color)} = highest, "
+        f"{paint('blue', BLUE, use_color)} = free\n"
     )
     headers = [os.path.basename(sys.argv[0])] + [name for name, _, _ in results] + trail
     credits = [fmt_balance(credit.get(name)) for name, _, _ in results]
