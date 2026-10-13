@@ -34,13 +34,15 @@ looks like a balance is kept, so most providers need no config. These
 are held for an hour, and refreshed by --update.
 
 A configured evaluator adds an int column, holding its intelligence
-index for the model. Where it rates the model at more than one effort
-level, a sel column shows the lowest level that keeps a share of the
-best int score, 95 percent unless --keep sets another. --effort shows
-int at a lower effort level, or the closest level below it that the
-evaluator rates. A model the
-evaluator rates at no named level keeps its one score, but only
-without --effort, as its score at a lower level is unknown.
+index for the model. The evaluator finds a model by its scores name,
+else by its name. Aliases only match provider names. Where it rates
+the model at more than one effort level, a sel column shows the
+lowest level that keeps a share of the best int score, 95 percent
+unless --keep sets another. --effort shows int at a lower effort
+level, or the closest level below it that the evaluator rates. A
+model the evaluator rates at no named level keeps its one score, but
+only without --effort, as its score at a lower level is unknown.
+The rel column shows the month the model was released.
 
 A provider set to pricing = "energy" bills the power its GPUs draw,
 not tokens, so its listed token prices are not what the account pays.
@@ -57,7 +59,8 @@ further back, a window at a time, until the history runs out.
 --sort name orders rows alphabetically, --sort price by the cheapest
 provider in each row, using the first number a cell shows. --sort int
 puts the highest score first, spelled out as intelligence if you
-prefer. Without it rows keep the order of the config.
+prefer. --sort date puts the newest release first. Without it rows
+keep the order of the config.
 
 Config format:
 
@@ -91,7 +94,7 @@ Config format:
   [[models]]
   name = "deepseek-v4.1-flash"
   aliases = ["deepseek-v4-1-flash"]
-  scores = "..."   # optional, a name only evaluators use
+  scores = "..."   # optional, the name evaluators like artificialanalysis.ai use for this model
 
 Usage:
   aimap.py [-v | -r 15:1] [-s price] [-e high] [-k 90] [-b EUR] [-u]
@@ -152,6 +155,7 @@ DIM = "\033[2m"
 GUESSED = "~"
 MEASURED = "*"
 ONLY = "+"
+MIN_WIDTH = 5
 
 # Energy billed accounts are priced from the usage api. The window it
 # serves is capped, so history is walked in chunks of that size.
@@ -802,6 +806,14 @@ def score_of(evaluations):
     return None
 
 
+def release_of(text):
+    """Release date in an ISO 8601 string, or None."""
+    try:
+        return datetime.fromisoformat(text).date()
+    except (TypeError, ValueError):
+        return None
+
+
 def effort_of(name):
     """Effort level in the brackets of a name, such as (xhigh)."""
     head, _, tail = name.rpartition("(")
@@ -826,9 +838,8 @@ def at_effort(levels, effort):
 
 
 def evaluations(evaluators, timeout, max_age, keep, effort):
-    """Slug to (intelligence, sel), and slug to the share of the input
-    price a cache hit costs, from every evaluator."""
-    index, families, shares = {}, {}, {}
+    """Scores, cache-price shares and release dates from evaluators."""
+    index, families, shares, dates = {}, {}, {}, {}
     for evaluator in evaluators:
         name = str(evaluator.get("name") or "evaluator")
         payload, err = cached_json(
@@ -852,6 +863,9 @@ def evaluations(evaluators, timeout, max_age, keep, effort):
                 continue
             intelligence = score_of(scores)
             index.setdefault(squash(slug), (intelligence, None))
+            released = release_of(entry.get("release_date"))
+            if released:
+                dates.setdefault(squash(slug), released)
             # A zero cache price next to a paid input is a placeholder.
             price = price_of(entry)
             if price and price[0] > 0 and price[2]:
@@ -869,7 +883,7 @@ def evaluations(evaluators, timeout, max_age, keep, effort):
         elif effort != EFFORTS[-1]:
             # No named levels, so the score at a lower effort is unknown.
             index[slug] = (None, None)
-    return index, shares
+    return index, shares, dates
 
 
 def fx_rates(base, timeout, max_age):
@@ -989,10 +1003,10 @@ def listed_currency(index):
 
 
 def build_rows(
-    models, results, catalogs, scores, shares, measured, base, rates, missing,
-    weights=None,
+    models, results, catalogs, scores, shares, dates,
+    measured, base, rates, missing, weights=None,
 ):
-    """One row per model, with its scores and a cell per provider."""
+    """One row per model, with metadata and a cell per provider."""
     rows = []
     for model in models:
         name = str(model.get("name", ""))
@@ -1001,11 +1015,10 @@ def build_rows(
         ordered = [name.lower()]
         ordered += [str(a).lower() for a in model.get("aliases", [])]
         names = set(ordered) | {squash(n) for n in ordered}
-        # An evaluator can file a model under a name a provider uses
-        # for another release, so that name only finds the score.
-        rated_as = [squash(n) for n in ordered + [str(model.get("scores", ""))] if n]
-        rated = next((scores[k] for k in rated_as if k in scores), (None, None))
-        share = next((shares[k] for k in rated_as if k in shares), None)
+        rated_as = squash(str(model.get("scores") or name))
+        rated = scores.get(rated_as, (None, None))
+        share = shares.get(rated_as)
+        release = dates.get(rated_as)
         cells = []
         for provider, index, err in results:
             if err:
@@ -1031,18 +1044,18 @@ def build_rows(
                 value = (blended,)
                 mark += GUESSED if guessed else ""
             cells.append(("ok", value, mark))
-        rows.append((name, rated, cells))
+        rows.append((name, rated, release, cells))
     return rows
 
 
 def sort_rows(rows, order):
-    """Order rows by name, cheapest price, or an evaluator score."""
+    """Order rows by name, price, score, or release date."""
     if order == "name":
         return sorted(rows, key=lambda row: row[0])
     if order == "price":
 
         def cheapest(row):
-            prices = [cell[1][0] for cell in row[2] if cell[0] == "ok"]
+            prices = [cell[1][0] for cell in row[3] if cell[0] == "ok"]
             # Free prices count only when there is nothing else.
             prices = [p for p in prices if p > 0] or prices
             return min(prices) if prices else float("inf"), row[0]
@@ -1055,6 +1068,12 @@ def sort_rows(rows, order):
             return -score if score is not None else float("inf"), row[0]
 
         return sorted(rows, key=rated)
+    if order == "date":
+
+        def released(row):
+            return -row[2].toordinal() if row[2] else float("inf"), row[0]
+
+        return sorted(rows, key=released)
     return rows
 
 
@@ -1073,22 +1092,27 @@ def render(rows, headers, credits, use_color, total=""):
             else labels[state]
             for state, price, _ in cells
         ]
-        for _, _, cells in rows
+        for _, _, _, cells in rows
     ]
-    # Score columns trail the providers. They are one fact per model,
+    # Fact columns trail the providers. They are one fact per model,
     # so they take no part in the ranking.
-    trail = headers[1 + len(credits) :]
-    scores = [
-        [
-            "-" if v is None else v if isinstance(v, str) else f"{v:.1f}"
-            for v in rated[: len(trail)]
-        ]
-        for _, rated, _ in rows
-    ]
+    n = 1 + len(credits)
+    trail = headers[n:]
+    facts = []
+    for _, (intelligence, sel), release, _ in rows:
+        rel = release.strftime("%b'%y").lower() if release else None
+        values = {"int": intelligence, "sel": sel, "rel": rel}
+        facts.append(
+            [
+                "-" if v is None else v if isinstance(v, str) else f"{v:.1f}"
+                for v in map(values.get, trail)
+            ]
+        )
     # Leave room for a mark, so the words align on their last letter.
     for i in range(len(trail)):
-        if any(s[i].endswith(ONLY) for s in scores):
-            for s in scores:
+        if any(s[i].endswith(ONLY) for s in facts):
+            trail[i] += " "
+            for s in facts:
                 s[i] += "" if s[i].endswith(ONLY) else " "
 
     # Per column, how wide each number is on either side of its
@@ -1104,15 +1128,19 @@ def render(rows, headers, credits, use_color, total=""):
             parts = [split_number(n[j]) for n in numbers if n[j]]
             if parts:
                 size.append([max(len(p[k]) for p in parts) for k in (0, 1)])
-        mark_width = max((len(row[2][i][2]) for row in rows), default=0)
+        mark_width = max((len(row[3][i][2]) for row in rows), default=0)
         span = sum(map(sum, size)) + len(size) - 1 + mark_width if size else 0
         layout.append((size, mark_width, span))
         label = max((len(c) for c in column if isinstance(c, str)), default=0)
-        widths.append(max(len(headers[i + 1]), span, label, len(credit)))
-    for i, header in enumerate(trail):
-        widths.append(max([len(header)] + [len(s[i]) for s in scores]))
+        # Columns fit their contents, so a long header is clipped.
+        widths.append(max(MIN_WIDTH, span, label, len(credit)))
+    for i in range(len(trail)):
+        widths.append(max([MIN_WIDTH] + [len(s[i]) for s in facts]))
 
-    print("  ".join(h.ljust(w) for h, w in zip(headers, widths)).rstrip())
+    # Fact headers sit right, over their values.
+    line = [h[:w].ljust(w) for h, w in zip(headers[:n], widths)]
+    line += [h.rjust(w) for h, w in zip(trail, widths[n:])]
+    print("  ".join(line).rstrip())
     if any(credits) or total:
         line = [total.ljust(widths[0])]
         line += [text.rjust(w) for text, w in zip(credits, widths[1:])]
@@ -1120,7 +1148,7 @@ def render(rows, headers, credits, use_color, total=""):
     print("  ".join("-" * w for w in widths))
 
     seen = set()
-    for row, cells, rated in zip(rows, grid, scores):
+    for row, cells, texts in zip(rows, grid, facts):
         # Rank on the printed value, so equal-looking prices from
         # providers that differ in the last decimals get one color.
         # Free prices are left out of the ranking.
@@ -1132,7 +1160,7 @@ def render(rows, headers, credits, use_color, total=""):
             extremes.append(ends)
         out = [row[0].ljust(widths[0])]
         for cell, (*_, mark), (size, mark_width, span), width in zip(
-            cells, row[2], layout, widths[1:]
+            cells, row[3], layout, widths[1:]
         ):
             if isinstance(cell, str):
                 out.append(paint(cell, DIM, use_color) + " " * (width - len(cell)))
@@ -1151,7 +1179,7 @@ def render(rows, headers, credits, use_color, total=""):
             seen.update(mark)
             pad = " " * (mark_width - len(mark) + width - span)
             out.append(" ".join(fields) + paint(mark, DIM, use_color) + pad)
-        for text, width in zip(rated, widths[1 + len(credits) :]):
+        for text, width in zip(texts, widths[n:]):
             cell = text.rjust(width)
             out.append(paint(cell, DIM, use_color) if text.strip() == "-" else cell)
         print("  ".join(out).rstrip())
@@ -1177,9 +1205,9 @@ def main(argv=None):
     ap.add_argument(
         "-s",
         "--sort",
-        choices=("name", "price", "int", "intelligence"),
+        choices=("name", "price", "int", "intelligence", "date"),
         metavar="KEY",
-        help="order rows by name, price or int; default config order",
+        help="order rows by name, price, int or date; default config order",
     )
     ap.add_argument(
         "-e",
@@ -1254,10 +1282,10 @@ def main(argv=None):
         )
         for p in providers
     }
-    scores, shares = (
+    scores, shares, dates = (
         evaluations(evaluators, args.timeout, max_age, args.keep, args.effort)
         if evaluators
-        else ({}, {})
+        else ({}, {}, {})
     )
     credit = balances(
         providers, args.timeout, 0 if args.update else BALANCE_TTL, base, rates
@@ -1285,13 +1313,13 @@ def main(argv=None):
     missing = set()
     rows = sort_rows(
         build_rows(
-            models, results, catalogs, scores, shares, measured, base, rates,
-            missing, weights,
+            models, results, catalogs, scores, shares, dates,
+            measured, base, rates, missing, weights,
         ),
         args.sort,
     )
     use_color = not args.no_color and sys.stdout.isatty()
-    trail = ["int", "sel"] if scores else []
+    trail = (["int", "sel"] if scores else []) + (["rel"] if dates else [])
 
     if weights:
         mix = "cache, input, output" if len(weights) == 3 else "input, output"
@@ -1312,6 +1340,8 @@ def main(argv=None):
             "sel is a suggested effort level that "
             f"gives {args.keep:g}% of the top int score"
         )
+    if dates:
+        print("rel is the month the model was released")
     print(
         f"{paint('green', GREEN, use_color)} = lowest, "
         f"{paint('red', RED, use_color)} = highest, "
