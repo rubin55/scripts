@@ -91,6 +91,7 @@ Config format:
   [[models]]
   name = "deepseek-v4.1-flash"
   aliases = ["deepseek-v4-1-flash"]
+  scores = "..."   # optional, a name only evaluators use
 
 Usage:
   aimap.py [-v | -r 15:1] [-s price] [-e high] [-k 90] [-b EUR] [-u]
@@ -1000,11 +1001,11 @@ def build_rows(
         ordered = [name.lower()]
         ordered += [str(a).lower() for a in model.get("aliases", [])]
         names = set(ordered) | {squash(n) for n in ordered}
-        rated = next(
-            (scores[key] for key in map(squash, ordered) if key in scores),
-            (None, None),
-        )
-        share = next((shares[k] for k in map(squash, ordered) if k in shares), None)
+        # An evaluator can file a model under a name a provider uses
+        # for another release, so that name only finds the score.
+        rated_as = [squash(n) for n in ordered + [str(model.get("scores", ""))] if n]
+        rated = next((scores[k] for k in rated_as if k in scores), (None, None))
+        share = next((shares[k] for k in rated_as if k in shares), None)
         cells = []
         for provider, index, err in results:
             if err:
