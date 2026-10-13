@@ -37,11 +37,12 @@ A configured evaluator adds an int column, holding its intelligence
 index for the model. The evaluator finds a model by its scores name,
 else by its name. Aliases only match provider names. Where it rates
 the model at more than one effort level, a sel column shows the
-lowest level that keeps a share of the best int score, 95 percent
-unless --keep sets another. --effort shows int at a lower effort
-level, or the closest level below it that the evaluator rates. A
-model the evaluator rates at no named level keeps its one score, but
-only without --effort, as its score at a lower level is unknown.
+lowest level that keeps a share of the best score, 95 percent unless
+--keep sets another, and int shows the score at that level. --effort
+shows int at a set effort level instead, or the closest level below
+it that the evaluator rates. A model the evaluator rates at no named
+level keeps its one score, unless --effort sets a level below max,
+as its score at a lower level is unknown.
 The rel column shows the month the model was released.
 
 A provider set to pricing = "energy" bills the power its GPUs draw,
@@ -879,8 +880,9 @@ def evaluations(evaluators, timeout, max_age, keep, effort):
     for slug in index:
         if slug in families:
             levels = families[slug]
-            index[slug] = at_effort(levels, effort), suggest(levels, keep)
-        elif effort != EFFORTS[-1]:
+            sel = suggest(levels, keep)
+            index[slug] = at_effort(levels, effort or sel.removesuffix(ONLY)), sel
+        elif effort and effort != EFFORTS[-1]:
             # No named levels, so the score at a lower effort is unknown.
             index[slug] = (None, None)
     return index, shares, dates
@@ -1189,7 +1191,7 @@ def render(rows, headers, credits, use_color, total=""):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Compare model prices per provider.")
     ap.add_argument(
-        "-c", "--config", default=CONFIG, help=f"config file, default {CONFIG}"
+        "-c", "--config", default=CONFIG, help=f"config file, default: {CONFIG}"
     )
     ap.add_argument("-b", "--base", default="USD", help="currency to show prices in")
     ap.add_argument("--no-fx", action="store_true", help="do not convert currencies")
@@ -1200,23 +1202,22 @@ def main(argv=None):
         "-r",
         "--ratio",
         default=None,
-        help=f"token mix for the blend, cache:input:output, default {DEFAULT_RATIO}",
+        help=f"token mix for the blend, cache:input:output, default: {DEFAULT_RATIO}",
     )
     ap.add_argument(
         "-s",
         "--sort",
         choices=("name", "price", "int", "intelligence", "date"),
         metavar="KEY",
-        help="order rows by name, price, int or date; default config order",
+        help="order rows by name, price, int or date; default: config order",
     )
     ap.add_argument(
         "-e",
         "--effort",
         choices=EFFORTS,
-        default="max",
         metavar="LEVEL",
-        help=f"effort level of the int score, {', '.join(EFFORTS)}; "
-        "default max",
+        help=f"effort level of the int score: {', '.join(EFFORTS)}. "
+        "default: determined by sel",
     )
     ap.add_argument(
         "-k",
@@ -1224,7 +1225,8 @@ def main(argv=None):
         type=float,
         default=DEFAULT_KEEP,
         metavar="PCT",
-        help="percent of the best int score the sel effort keeps, default 95",
+        help="keep PCT%% of the top int score; "
+        "influences suggested effort level (sel), default: 95",
     )
     ap.add_argument(
         "-v",
@@ -1237,7 +1239,7 @@ def main(argv=None):
         "--timeout",
         type=int,
         default=20,
-        help="seconds to wait on one request, default 20",
+        help="seconds to wait on one request, default: 20",
     )
     ap.add_argument(
         "-u", "--update", action="store_true", help=f"ignore the cache in {CACHE}"
@@ -1331,14 +1333,17 @@ def main(argv=None):
     else:
         shape = "in, out"
     print(f"prices per million tokens in {base} ({shape})")
-    if scores:
+    if scores and args.effort:
         print(
             f"int is at effort level {args.effort}, "
             "or the closest level below it"
         )
+    elif scores:
+        print("int is at the sel effort level")
+    if scores:
         print(
             "sel is a suggested effort level that "
-            f"gives {args.keep:g}% of the top int score"
+            f"gives {args.keep:g}% of the top score"
         )
     if dates:
         print("rel is the month the model was released")
