@@ -371,6 +371,8 @@ def catalogs_update(args):
             if kept:
                 label += f"+{kept} kept"
         models.sort(key=lambda m: m.get("slug", ""))
+        for i, m in enumerate(models):
+            m["priority"] = i
         if not args.dry_run:
             write_file(path, json.dumps({"models": models}, indent=1) + "\n")
         if not args.quiet:
