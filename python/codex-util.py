@@ -69,6 +69,10 @@ def print_table(headers, rows):
 # Providers that serve the standard OpenAI {"data": [...]} list get
 # each entry translated to a minimal ModelInfo. base_instructions is
 # copied from the bundled catalog so entries keep the builtin prompt.
+# Models without effort levels or a context window get them from
+# models.dev, if it has the same provider key and model id.
+
+MODELS_DEV_URL = "https://models.dev/api.json"
 
 EFFORT_DESCRIPTIONS = {
     "minimal": "Fastest responses with minimal reasoning",
@@ -142,12 +146,17 @@ def bundled_base_instructions(codex_bin):
 def fetch_models(base_url, token, timeout, client_version=None):
     # With a client version, Codex-aware routers serve the native format.
     url = base_url.rstrip("/") + "/models"
-    headers = {"Accept": "application/json"}
+    headers = {}
     if client_version:
         url += f"?client_version={client_version}"
         headers["User-Agent"] = f"codex-cli/{client_version}"
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    return fetch_json(url, headers, timeout)
+
+
+def fetch_json(url, headers, timeout):
+    headers = {"Accept": "application/json", **headers}
     req = urllib.request.Request(url, headers=headers, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -179,6 +188,13 @@ def as_dict(v):
 
 def as_str_list(v):
     return [e for e in v if isinstance(e, str)] if isinstance(v, list) else []
+
+
+def reasoning_levels(efforts):
+    return [
+        {"effort": e, "description": EFFORT_DESCRIPTIONS.get(e, f"{e} reasoning")}
+        for e in efforts
+    ]
 
 
 def translate_entry(item, index, base_instructions):
@@ -250,10 +266,7 @@ def translate_entry(item, index, base_instructions):
         "slug": model_id,
         "display_name": str(display),
         "description": str(desc),
-        "supported_reasoning_levels": [
-            {"effort": e, "description": EFFORT_DESCRIPTIONS.get(e, f"{e} reasoning")}
-            for e in efforts
-        ],
+        "supported_reasoning_levels": reasoning_levels(efforts),
         "shell_type": "default",
         "visibility": "list",
         "supported_in_api": True,
@@ -294,6 +307,46 @@ def merge_models(models, extra):
     return len(new)
 
 
+def models_dev(timeout):
+    # Map provider and model id to the model entry in models.dev.
+    # Cloudflare blocks the default urllib User-Agent.
+    headers = {"User-Agent": "codex-util"}
+    data, err = fetch_json(MODELS_DEV_URL, headers, timeout)
+    if data is None:
+        print(f"warn: models.dev: {err}", file=sys.stderr)
+        return {}
+    return {
+        (key, model_id): model
+        for key, provider in data.items()
+        for model_id, model in provider.get("models", {}).items()
+    }
+
+
+def add_models_dev(models, provider, dev):
+    # Set missing effort levels and context windows, return how many.
+    count = 0
+    for m in models:
+        info = dev.get((provider, m.get("slug")), {})
+        efforts = [
+            e
+            for option in info.get("reasoning_options", [])
+            if option.get("type") == "effort"
+            for e in option.get("values", [])
+            if e in EFFORT_DESCRIPTIONS
+        ]
+        if efforts and not m.get("supported_reasoning_levels"):
+            m["supported_reasoning_levels"] = reasoning_levels(efforts)
+            m["default_reasoning_level"] = (
+                "medium" if "medium" in efforts else efforts[0]
+            )
+            count += 1
+        context = info.get("limit", {}).get("context")
+        if context and not m.get("context_window"):
+            m["context_window"] = m["max_context_window"] = context
+            count += 1
+    return count
+
+
 def read_models(path):
     with open(path) as f:
         return json.load(f).get("models", [])
@@ -306,8 +359,8 @@ def provider_models(key, info, timeout, client_version, base_instructions):
         return None, "no base_url"
     token = resolve_token(key, info)
     payload, err = fetch_models(str(base_url), token, timeout, client_version)
-    if err:
-        return None, err
+    if payload is None:
+        return None, err or "empty response"
     if not isinstance(payload.get("models"), list):
         if not isinstance(payload.get("data"), list):
             return None, f"unexpected shape, keys: {sorted(payload)}"
@@ -315,7 +368,7 @@ def provider_models(key, info, timeout, client_version, base_instructions):
     # Add translated entries for ids missing from a native catalog.
     models, label = payload["models"], "native"
     plain, err = fetch_models(str(base_url), token, timeout)
-    if err:
+    if plain is None:
         print(f"warn {key}: plain list failed: {err}", file=sys.stderr)
     elif isinstance(plain.get("data"), list):
         extra = translate_models(plain["data"], base_instructions, len(models))
@@ -352,6 +405,7 @@ def catalogs_update(args):
     if not base_instructions:
         print("warn: no bundled instructions, using stub", file=sys.stderr)
 
+    dev = models_dev(args.timeout)
     out_dir = Path(args.dir)
     if not args.dry_run:
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -370,6 +424,9 @@ def catalogs_update(args):
             kept = merge_models(models, read_models(path))
             if kept:
                 label += f"+{kept} kept"
+        added = add_models_dev(models, key, dev)
+        if added:
+            label += f", {added} values from models.dev"
         models.sort(key=lambda m: m.get("slug", ""))
         for i, m in enumerate(models):
             m["priority"] = i
@@ -384,7 +441,7 @@ def catalogs_update(args):
 # Profiles
 
 
-def profiles_list(args):
+def profiles_list(_):
     rows = []
     for path in profile_paths():
         data = load_toml(path)
@@ -513,7 +570,10 @@ def replace_trust(entries):
 def expand_trusted_dirs(path):
     table = load_toml(path).get("trusted-dirs")
     if not isinstance(table, dict):
-        raise ValueError("trusted-dirs.toml must contain a [trusted-dirs] table")
+        # A bad config file is a value error, main catches only those.
+        raise ValueError(  # noqa: TRY004
+            "trusted-dirs.toml must contain a [trusted-dirs] table"
+        )
     entries = []
     for raw_path, depth in table.items():
         if not isinstance(raw_path, str) or not raw_path.startswith("/"):
@@ -535,7 +595,7 @@ def expand_trusted_dirs(path):
     return entries
 
 
-def trust_list(args):
+def trust_list(_):
     rows = [[level, name, key] for key, level, name in sorted(trust_entries())]
     print_table(["level", "config", "path"], rows)
     return 0
@@ -553,14 +613,14 @@ def trust_generate(args):
     return 0
 
 
-def trust_consolidate(args):
+def trust_consolidate(_):
     entries = deduplicate((key, level) for key, level, _ in trust_entries())
     replace_trust(entries)
     print(f"consolidate: wrote {len(entries)} trust roots to {config_path()}")
     return 0
 
 
-def trust_purge(args):
+def trust_purge(_):
     removed = replace_trust([])
     print(f"purge: removed {removed} trust blocks from all configs")
     return 0
