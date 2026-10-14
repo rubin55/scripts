@@ -1132,10 +1132,12 @@ def render(rows, headers, credits, use_color, total=""):
                 size.append([max(len(p[k]) for p in parts) for k in (0, 1)])
         mark_width = max((len(row[3][i][2]) for row in rows), default=0)
         span = sum(map(sum, size)) + len(size) - 1 + mark_width if size else 0
-        layout.append((size, mark_width, span))
+        # A label starts under the last digit before the first point.
+        indent = size[0][0] - 1 if size else 0
+        layout.append((size, mark_width, span, indent))
         label = max((len(c) for c in column if isinstance(c, str)), default=0)
         # Columns fit their contents, so a long header is clipped.
-        widths.append(max(MIN_WIDTH, span, label, len(credit)))
+        widths.append(max(MIN_WIDTH, span, indent + label, len(credit)))
     for i in range(len(trail)):
         widths.append(max([MIN_WIDTH] + [len(s[i]) for s in facts]))
 
@@ -1161,11 +1163,12 @@ def render(rows, headers, credits, use_color, total=""):
             ends = (min(values), max(values)) if len(values) > 1 else (None, None)
             extremes.append(ends)
         out = [row[0].ljust(widths[0])]
-        for cell, (*_, mark), (size, mark_width, span), width in zip(
+        for cell, (*_, mark), (size, mark_width, span, indent), width in zip(
             cells, row[3], layout, widths[1:]
         ):
             if isinstance(cell, str):
-                out.append(paint(cell, DIM, use_color) + " " * (width - len(cell)))
+                pad = " " * (width - indent - len(cell))
+                out.append(" " * indent + paint(cell, DIM, use_color) + pad)
                 continue
             fields = []
             for text, part, (low, high) in zip(cell, size, extremes):
