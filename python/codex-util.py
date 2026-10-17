@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manage Codex model catalogs, profiles and trust roots in $CODEX_HOME."""
+"""Manage Codex model catalogs, profiles, MCP servers and trust roots."""
 
 import argparse
 import json
@@ -13,6 +13,8 @@ import urllib.error
 import urllib.request
 from itertools import pairwise
 from pathlib import Path
+
+TOOL = "codex"
 
 
 def codex_home():
@@ -411,7 +413,7 @@ def catalogs_update(args):
 
     dev = models_dev(args.timeout)
     out_dir = Path(args.dir)
-    if not args.dry_run:
+    if not args.no_run:
         out_dir.mkdir(parents=True, exist_ok=True)
     failures = 0
     for key, info in providers.items():
@@ -424,7 +426,7 @@ def catalogs_update(args):
             continue
         # Keep models from the previous file that the provider no longer lists.
         path = out_dir / f"{key}.json"
-        if not args.dry_run and path.is_file():
+        if not args.no_run and path.is_file():
             kept = merge_models(models, read_models(path))
             if kept:
                 label += f"+{kept} kept"
@@ -434,10 +436,10 @@ def catalogs_update(args):
         models.sort(key=lambda m: m.get("slug", ""))
         for i, m in enumerate(models):
             m["priority"] = i
-        if not args.dry_run:
+        if not args.no_run:
             write_file(path, json.dumps({"models": models}, indent=1) + "\n")
         if not args.quiet:
-            done = f"ok {key}" if args.dry_run else f"wrote {path}"
+            done = f"ok {key}" if args.no_run else f"wrote {path}"
             print(f"{done}: {len(models)} models ({label})")
     return 1 if failures else 0
 
@@ -519,6 +521,182 @@ def profiles_set(args):
     return 0
 
 
+# MCP servers
+#
+# Servers come from config.toml, the profile configs and the project
+# configs. Codex reads <project>/.codex/config.toml only for trusted
+# projects, so only the trust roots are checked for one. A project
+# config can set enabled for a server that config.toml defines.
+
+TABLE_HEADER = re.compile(r"^\[([^\[\]\n]+)\][ \t]*(?:#.*)?$", re.MULTILINE)
+ENABLED_LINE = re.compile(r"^enabled[ \t]*=.*\n?", re.MULTILINE)
+
+
+def trusted_roots():
+    return sorted({key for key, level, _ in trust_entries() if level == "trusted"})
+
+
+def project_config_path(root):
+    return Path(root, ".codex", "config.toml")
+
+
+def mcp_layers():
+    # Return (scope, path) for the configs that can hold MCP servers.
+    return [
+        ("user", config_path()),
+        *(("profile", path) for path in profile_paths()),
+        *(
+            ("project", path)
+            for root in trusted_roots()
+            if (path := project_config_path(root)).is_file()
+        ),
+    ]
+
+
+def mcp_list(_):
+    rows = []
+    for scope, path in mcp_layers():
+        for name, server in mcp_tables(path).items():
+            status = "enabled" if server.get("enabled", True) else "disabled"
+            config = str(path) if scope == "project" else path.name
+            rows.append([scope, name, status, config])
+    print_table(["scope", "name", "status", "config"], rows)
+    return 0
+
+
+def mcp_tables(path):
+    # Map the MCP servers in a config to their tables, if it exists.
+    if not path.is_file():
+        return {}
+    servers = load_toml(path).get("mcp_servers", {})
+    return {
+        name: server for name, server in servers.items() if isinstance(server, dict)
+    }
+
+
+def user_defaults():
+    # Map the servers in config.toml to their enabled state.
+    servers = mcp_tables(config_path())
+    return {name: server.get("enabled", True) for name, server in servers.items()}
+
+
+def server_states(names, enable, disable):
+    # Map server names to enabled. A server name wins over all.
+    if both := set(enable) & set(disable):
+        raise ValueError(f"both enabled and disabled: {', '.join(sorted(both))}")
+    if unknown := {*enable, *disable} - {"all", *names}:
+        raise ValueError(f"unknown MCP servers: {', '.join(sorted(unknown))}")
+    states = {}
+    for words, state in ((enable, True), (disable, False)):
+        if "all" in words:
+            states = dict.fromkeys(names, state)
+    for words, state in ((enable, True), (disable, False)):
+        states.update(dict.fromkeys(set(words) - {"all"}, state))
+    return states
+
+
+def table_path(inner):
+    # Return the key path of a [table] header, None if not valid.
+    try:
+        data = tomllib.loads(f"[{inner}]")
+    except tomllib.TOMLDecodeError:
+        return None
+    path = []
+    while len(data) == 1:
+        ((key, data),) = data.items()
+        path.append(key)
+    return tuple(path)
+
+
+def toml_key(key):
+    if re.fullmatch(r"[A-Za-z0-9_-]+", key):
+        return key
+    return '"' + key.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def set_enabled(text, name, enabled):
+    # Set enabled in the [mcp_servers.<name>] table, add it if missing.
+    # None removes enabled, and the table if nothing else is in it.
+    line = "" if enabled is None else f"enabled = {str(enabled).lower()}\n"
+    if text and not text.endswith("\n"):
+        text += "\n"
+    headers = list(TABLE_HEADER.finditer(text))
+    for match, after in zip(headers, [*headers[1:], None]):
+        if table_path(match.group(1)) == ("mcp_servers", name):
+            start, end = match.end() + 1, after.start() if after else len(text)
+            body, count = ENABLED_LINE.subn(line, text[start:end], count=1)
+            if not count:
+                body = line + body
+            if enabled is None and not body.strip():
+                return text[: match.start()] + text[end:]
+            return text[:start] + body + text[end:]
+    if enabled is None:
+        return text
+    head = text.rstrip("\n") + "\n\n" if text.strip() else ""
+    return f"{head}[mcp_servers.{toml_key(name)}]\n{line}"
+
+
+def edit_states(path, states, defaults):
+    # Return the config text with the states set, None if unchanged. Only
+    # a server in the wrong state changes: to its default by removing
+    # enabled, else by setting it. Servers not in defaults are enabled.
+    old = path.read_text() if path.is_file() else ""
+    servers = tomllib.loads(old).get("mcp_servers", {})
+    text = old
+    for name, state in sorted(states.items()):
+        default = defaults.get(name, True)
+        if servers.get(name, {}).get("enabled", default) != state:
+            text = set_enabled(text, name, None if state == default else state)
+    if text == old:
+        return None
+    text = text.strip("\n") + "\n" if text.strip() else ""
+    servers = tomllib.loads(text).get("mcp_servers", {})
+    for name, state in states.items():
+        if servers.get(name, {}).get("enabled", defaults.get(name, True)) != state:
+            raise ValueError(f"cannot set enabled in {path}")
+    return text
+
+
+def save_config(path, text):
+    # Write a config. Empty text removes it, and its dir if empty.
+    if text:
+        path.parent.mkdir(exist_ok=True)
+        write_file(path, text)
+        return
+    path.unlink(missing_ok=True)
+    try:
+        path.parent.rmdir()
+    except OSError:
+        pass
+
+
+def mcp_config(args):
+    if not args.enable and not args.disable:
+        raise ValueError("give servers to change with -e or -d")
+    if args.scope == "project":
+        if not args.dir:
+            raise ValueError("--scope project needs -D DIR")
+        root = str(Path(args.dir).expanduser().resolve())
+        if root not in trusted_roots():
+            raise ValueError(f"not a trusted project: {root}")
+        path = project_config_path(root)
+        defaults = user_defaults()
+        names = list(mcp_tables(path) | defaults)
+    else:
+        if args.dir:
+            raise ValueError("-D needs --scope project")
+        path = config_path()
+        defaults, names = {}, list(mcp_tables(path))
+    states = server_states(names, args.enable, args.disable)
+    text = edit_states(path, states, defaults)
+    if text is None:
+        print(f"config: {path} is up to date")
+        return 0
+    save_config(path, text)
+    print(f"config: {'updated' if text else 'removed'} {path}")
+    return 0
+
+
 # Trust roots
 
 TRUST_BLOCK = re.compile(
@@ -529,8 +707,7 @@ TRUST_BLOCK = re.compile(
 
 
 def trust_entry(path, level):
-    key = '"' + str(path).replace("\\", "\\\\").replace('"', '\\"') + '"'
-    return f'[projects.{key}]\ntrust_level = "{level}"\n'
+    return f'[projects.{toml_key(str(path))}]\ntrust_level = "{level}"\n'
 
 
 def parse_block(block):
@@ -571,13 +748,61 @@ def replace_trust(entries):
     return removed
 
 
-def expand_trusted_dirs(path):
-    table = load_toml(path).get("trusted-dirs")
-    if not isinstance(table, dict):
-        # A bad config file is a value error, main catches only those.
-        raise ValueError(  # noqa: TRY004
-            "trusted-dirs.toml must contain a [trusted-dirs] table"
-        )
+# ~/.trusted-dirs.toml has tables per tool: "*" for all tools, codex
+# or claude for one. ["*".trusted-dirs] maps a dir to a depth. The
+# ["*".mcp.enabled] and ["*".mcp.disabled] tables map a trust root to
+# "all" or a list of MCP servers, which then keep that state in it.
+# Tool tables win over "*" tables. "*" ignores names a tool lacks.
+
+
+def trusted_dirs_layers():
+    # Return the "*" and the tool tables of ~/.trusted-dirs.toml.
+    data = load_toml(trusted_dirs_path())
+    layers = [data.get("*", {}), data.get(TOOL, {})]
+    if not all(isinstance(layer, dict) for layer in layers):
+        raise ValueError(f'trusted-dirs.toml: "*" and {TOOL} must be tables')
+    return layers
+
+
+def pin_words(value, root):
+    if value == "all":
+        return ["all"]
+    if isinstance(value, list) and all(isinstance(v, str) for v in value):
+        return value
+    raise ValueError(f'MCP pin for {root} must be "all" or a list of names')
+
+
+def mcp_pins(layers, roots):
+    # Return (root, enable, disable, strict) for the MCP pins. Only the
+    # tool tables are strict about names.
+    pins = []
+    for layer, strict in zip(layers, (False, True)):
+        mcp = layer.get("mcp", {})
+        enabled, disabled = mcp.get("enabled", {}), mcp.get("disabled", {})
+        for raw in sorted({*enabled, *disabled}):
+            root = os.path.normpath(raw)
+            if root not in roots:
+                raise ValueError(f"MCP pin is not a trust root: {raw}")
+            enable = pin_words(enabled.get(raw, []), raw)
+            disable = pin_words(disabled.get(raw, []), raw)
+            pins.append((root, enable, disable, strict))
+    return pins
+
+
+def known_words(words, names):
+    return [word for word in words if word in {"all", *names}]
+
+
+def expand_trusted_dirs(layers):
+    table = {}
+    for layer in layers:
+        part = layer.get("trusted-dirs", {})
+        if not isinstance(part, dict):
+            # A bad config file is a value error, main catches only those.
+            raise ValueError("trusted-dirs must be a table")  # noqa: TRY004
+        table |= part
+    if not table:
+        raise ValueError('trusted-dirs.toml needs a ["*".trusted-dirs] table')
     entries = []
     for raw_path, depth in table.items():
         if not isinstance(raw_path, str) or not raw_path.startswith("/"):
@@ -606,14 +831,39 @@ def trust_list(_):
 
 
 def trust_generate(args):
-    entries = deduplicate(expand_trusted_dirs(trusted_dirs_path()))
-    if args.dry_run:
+    # Trust the roots, and give each project config the MCP states of
+    # config.toml, changed by -e and -d, then by the MCP pins.
+    layers = trusted_dirs_layers()
+    entries = deduplicate(expand_trusted_dirs(layers))
+    defaults = user_defaults()
+    names = list(defaults)
+    base = defaults | server_states(names, args.enable, args.disable)
+    pins = {}
+    for root, enable, disable, strict in mcp_pins(layers, {d for d, _ in entries}):
+        if not strict:
+            enable, disable = known_words(enable, names), known_words(disable, names)
+        try:
+            pins[root] = pins.get(root, {}) | server_states(names, enable, disable)
+        except ValueError as e:
+            raise ValueError(f"MCP pin for {root}: {e}") from None
+    edits = {}
+    for directory, _ in entries:
+        path = project_config_path(directory)
+        states = base | pins.get(directory, {})
+        if (text := edit_states(path, states, defaults)) is not None:
+            edits[path] = text
+    if args.no_run:
         for directory, level in entries:
             print(f"{directory} -> {level}")
-        print(f"generate: {len(entries)} trust roots")
+        for path, text in edits.items():
+            print(f"{path} -> {'updated' if text else 'removed'}")
+        print(f"generate: {len(entries)} trust roots, {len(edits)} project configs")
         return 0
     replace_trust(entries)
+    for path, text in edits.items():
+        save_config(path, text)
     print(f"generate: wrote {len(entries)} trust roots to {config_path()}")
+    print(f"generate: changed {len(edits)} project configs")
     return 0
 
 
@@ -634,13 +884,14 @@ def trust_purge(_):
 #
 # The case patterns match the words before the cursor. Deeper commands
 # come first, so the first match is the most specific one. Values for
-# --provider, --model and --effort come from "completion LINE".
+# --provider, --model, --effort, --enable and --disable come from
+# "completion LINE".
 
 BASH_COMPLETION = """\
 _codex_util() {
     local cur=${COMP_WORDS[COMP_CWORD]} prev=${COMP_WORDS[COMP_CWORD-1]}
     local line=${COMP_LINE:0:COMP_POINT} path="" word words
-    local re=' (-p|--provider|-m|--model|-e|--effort) +([^ ]*)$'
+    local re=' (-p|--provider|-m|--model|-e|--effort|-d|--enable|--disable) +([^ ]*)$'
     if [[ $line =~ $re ]]; then
         local value=${BASH_REMATCH[2]}
         words=$(%(prog)s completion "$line" 2>/dev/null)
@@ -694,6 +945,8 @@ def option_values(line):
     words = [long.get(word, word) for word in line.split()]
     if not line[-1:].isspace():
         words.pop()
+    if {"mcp-servers", "generate"} & set(words):
+        return ["all", *mcp_tables(config_path())]
     opts = dict(pairwise(words))
     if words[-1] == "--provider":
         return sorted({p for p in profile_providers().values() if p})
@@ -741,8 +994,8 @@ def main(argv=None):
     cmd.add_argument("-c", "--client-version")
     cmd.add_argument("-b", "--binary", default="codex")
     cmd.add_argument(
-        "-d",
-        "--dry-run",
+        "-n",
+        "--no-run",
         action="store_true",
         help="fetch and translate, do not write files",
     )
@@ -763,16 +1016,67 @@ def main(argv=None):
     )
     cmd.set_defaults(func=profiles_set)
 
+    mcp = group("mcp-servers", "MCP servers in the Codex config files")
+    mcp.add_parser(
+        "list", help="list MCP servers, their scope and status"
+    ).set_defaults(func=mcp_list)
+    cmd = mcp.add_parser(
+        "config", help="enable or disable MCP servers in the user or a project config"
+    )
+    cmd.add_argument(
+        "-s",
+        "--scope",
+        choices=("user", "project"),
+        default="user",
+        help="config to write, default: user",
+    )
+    cmd.add_argument("-D", "--dir", help="trusted project dir, for --scope project")
+    cmd.add_argument(
+        "-e",
+        "--enable",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="enable this MCP server, or all (repeatable)",
+    )
+    cmd.add_argument(
+        "-d",
+        "--disable",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="disable this MCP server, or all (repeatable)",
+    )
+    cmd.set_defaults(func=mcp_config)
+
     trust = group("trust-roots", "project trust entries")
     trust.add_parser(
         "list", help="list trust roots found in all Codex config files"
     ).set_defaults(func=trust_list)
     cmd = trust.add_parser(
-        "generate", help="generate trust roots from ~/.trusted-dirs.toml"
+        "generate",
+        help="generate trust roots from ~/.trusted-dirs.toml, and the MCP "
+        "states in their project configs",
+    )
+    cmd.add_argument(
+        "-e",
+        "--enable",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="enable this MCP server in each project, or all (repeatable)",
     )
     cmd.add_argument(
         "-d",
-        "--dry-run",
+        "--disable",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="disable this MCP server in each project, or all (repeatable)",
+    )
+    cmd.add_argument(
+        "-n",
+        "--no-run",
         action="store_true",
         help="print roots without writing config files",
     )

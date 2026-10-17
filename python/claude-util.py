@@ -12,6 +12,7 @@ from pathlib import Path
 TRUST_KEY = "hasTrustDialogAccepted"
 DISABLED_KEY = "disabledMcpServers"
 SCOPES = ["claude.ai", "local", "user"]
+TOOL = "claude"
 
 
 def config_path():
@@ -65,15 +66,62 @@ def print_table(headers, rows):
 # projects[<path>].hasTrustDialogAccepted set to true. The names in
 # projects[<path>].disabledMcpServers are not started in that project.
 # Claude Code uses the git root as the project path, or else the cwd.
+#
+# ~/.trusted-dirs.toml has tables per tool: "*" for all tools, codex
+# or claude for one. ["*".trusted-dirs] maps a dir to a depth. The
+# ["*".mcp.enabled] and ["*".mcp.disabled] tables map a trust root to
+# "all" or a list of MCP servers, which then keep that state in it.
+# Tool tables win over "*" tables. "*" ignores names a tool lacks.
 
 
-def expand_trusted_dirs(path):
-    table = load_toml(path).get("trusted-dirs")
-    if not isinstance(table, dict):
-        # A bad config file is a value error, main catches only those.
-        raise ValueError(  # noqa: TRY004
-            "trusted-dirs.toml must contain a [trusted-dirs] table"
-        )
+def trusted_dirs_layers():
+    # Return the "*" and the tool tables of ~/.trusted-dirs.toml.
+    data = load_toml(trusted_dirs_path())
+    layers = [data.get("*", {}), data.get(TOOL, {})]
+    if not all(isinstance(layer, dict) for layer in layers):
+        raise ValueError(f'trusted-dirs.toml: "*" and {TOOL} must be tables')
+    return layers
+
+
+def pin_words(value, root):
+    if value == "all":
+        return ["all"]
+    if isinstance(value, list) and all(isinstance(v, str) for v in value):
+        return value
+    raise ValueError(f'MCP pin for {root} must be "all" or a list of names')
+
+
+def mcp_pins(layers, roots):
+    # Return (root, enable, disable, strict) for the MCP pins. Only the
+    # tool tables are strict about names.
+    pins = []
+    for layer, strict in zip(layers, (False, True)):
+        mcp = layer.get("mcp", {})
+        enabled, disabled = mcp.get("enabled", {}), mcp.get("disabled", {})
+        for raw in sorted({*enabled, *disabled}):
+            root = os.path.normpath(raw)
+            if root not in roots:
+                raise ValueError(f"MCP pin is not a trust root: {raw}")
+            enable = pin_words(enabled.get(raw, []), raw)
+            disable = pin_words(disabled.get(raw, []), raw)
+            pins.append((root, enable, disable, strict))
+    return pins
+
+
+def known_words(words, names):
+    return [word for word in words if word in {"all", *names}]
+
+
+def expand_trusted_dirs(layers):
+    table = {}
+    for layer in layers:
+        part = layer.get("trusted-dirs", {})
+        if not isinstance(part, dict):
+            # A bad config file is a value error, main catches only those.
+            raise ValueError("trusted-dirs must be a table")  # noqa: TRY004
+        table |= part
+    if not table:
+        raise ValueError('trusted-dirs.toml needs a ["*".trusted-dirs] table')
     entries = []
     for raw_path, depth in table.items():
         if not isinstance(raw_path, str) or not raw_path.startswith("/"):
@@ -109,12 +157,23 @@ def mcp_servers(config):
     return sorted(servers)
 
 
-def select_servers(servers, words):
-    # Return the names that words select: all, a scope or a server name.
-    words = set(words)
-    if unknown := words - {"all", *SCOPES} - {name for _, name, _ in servers}:
+def check_words(servers, words):
+    # Words are all, a scope or a server name.
+    if unknown := set(words) - {"all", *SCOPES} - {name for _, name, _ in servers}:
         raise ValueError(f"unknown MCP servers or scopes: {', '.join(sorted(unknown))}")
-    return {name for scope, name, _ in servers if {"all", scope, name} & words}
+
+
+def word_states(servers, enable, disable):
+    # Map names to enabled. A name wins over a scope, a scope over all.
+    if both := set(enable) & set(disable):
+        raise ValueError(f"both enabled and disabled: {', '.join(sorted(both))}")
+    states = {}
+    for level in range(3):
+        for words, state in ((enable, True), (disable, False)):
+            for scope, name, _ in servers:
+                if ("all", scope, name)[level] in words:
+                    states[name] = state
+    return states
 
 
 def mcp_list(_):
@@ -133,25 +192,44 @@ def trust_list(_):
 
 
 def trust_generate(args):
-    entries = expand_trusted_dirs(trusted_dirs_path())
+    # Trust the roots and set their disabledMcpServers. All servers are
+    # disabled, except those -e enables, then the MCP pins apply.
+    layers = trusted_dirs_layers()
+    entries = expand_trusted_dirs(layers)
     directories = sorted({os.path.normpath(d) for d in entries})
     config = load_config()
     servers = mcp_servers(config)
-    enabled = select_servers(servers, args.enable)
-    if args.dry_run:
+    names = {name for _, name, _ in servers}
+    check_words(servers, args.enable)
+    pins = []
+    for root, enable, disable, strict in mcp_pins(layers, set(directories)):
+        if strict:
+            check_words(servers, enable + disable)
+        else:
+            enable, disable = known_words(enable, names), known_words(disable, names)
+        pins.append((root, enable, disable))
+    shared = [server for server in servers if server[0] != "local"]
+    if args.no_run:
         print(*directories, sep="\n")
-        print(f"generate: {len(directories)} trust roots")
-        print(f"generate: enabled MCP servers: {', '.join(sorted(enabled)) or 'none'}")
+        states = word_states(shared, args.enable, [])
+        enabled = sorted(name for name, state in states.items() if state)
+        print(f"generate: {len(directories)} trust roots, {len(pins)} MCP pins")
+        print(f"generate: enabled MCP servers: {', '.join(enabled) or 'none'}")
         return 0
-    shared = {name for scope, name, _ in servers if scope != "local"}
     projects = config.setdefault("projects", {})
     for project in projects.values():
         project.pop(TRUST_KEY, None)
     for directory in directories:
         project = projects.setdefault(directory, {})
         project[TRUST_KEY] = True
-        local = project.get("mcpServers", {})
-        project[DISABLED_KEY] = sorted((shared | set(local)) - enabled)
+        local = [("local", name, directory) for name in project.get("mcpServers", {})]
+        servers_here = shared + local
+        states = dict.fromkeys((name for _, name, _ in servers_here), False)
+        states |= word_states(servers_here, args.enable, [])
+        for root, enable, disable in pins:
+            if root == directory:
+                states |= word_states(servers_here, enable, disable)
+        project[DISABLED_KEY] = sorted(n for n, state in states.items() if not state)
     save_config(config)
     print(f"generate: wrote {len(directories)} trust roots to {config_path()}")
     return 0
@@ -163,6 +241,82 @@ def trust_purge(_):
     config["projects"] = {}
     save_config(config)
     print(f"purge: removed {removed} projects from {config_path()}")
+    return 0
+
+
+# Completion
+#
+# The case patterns match the words before the cursor. Deeper commands
+# come first, so the first match is the most specific one. Values for
+# --enable come from "completion LINE". Server names can hold spaces,
+# so each value is escaped with printf %q before it is matched.
+
+BASH_COMPLETION = """\
+_claude_util() {
+    local cur=${COMP_WORDS[COMP_CWORD]} prev=${COMP_WORDS[COMP_CWORD-1]}
+    local line=${COMP_LINE:0:COMP_POINT} path="" word words value
+    local re=' (-e|--enable) +((\\\\ |[^ ])*)$'
+    if [[ $line =~ $re ]]; then
+        local typed=${BASH_REMATCH[2]}
+        COMPREPLY=()
+        while IFS= read -r value; do
+            printf -v value %%q "$value"
+            [[ $value == "$typed"* ]] || continue
+            # Bash splits cur at COMP_WORDBREAKS, so remove the text before it.
+            COMPREPLY+=("${value#"${typed%%"$cur"}"}")
+        done < <(%(prog)s completion "$line" 2>/dev/null)
+        return
+    fi
+    case $prev in
+        %(value_options)s) compopt -o default; COMPREPLY=(); return ;;
+    esac
+    for word in "${COMP_WORDS[@]:1:COMP_CWORD-1}"; do
+        path+="$word "
+    done
+    case $path in
+%(cases)s
+    esac
+    COMPREPLY=($(compgen -W "$words" -- "$cur"))
+}
+complete -F _claude_util %(prog)s
+"""
+
+
+def bash_completion(parser):
+    cases, value_options = [], set()
+
+    def walk(p, path):
+        words = []
+        for action in p._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                for name, sub in action.choices.items():
+                    walk(sub, f"{path}{name} ")
+                    words.append(name)
+            else:
+                words += action.option_strings
+                if action.nargs != 0:
+                    value_options.update(action.option_strings)
+        cases.append(f'        "{path}"*) words="{" ".join(words)}" ;;')
+
+    walk(parser, "")
+    return BASH_COMPLETION % {
+        "value_options": "|".join(sorted(value_options)),
+        "cases": "\n".join(cases),
+        "prog": parser.prog,
+    }
+
+
+def option_values(_):
+    # Return the values for --enable: all, the scopes and server names.
+    names = sorted({name for _, name, _ in mcp_servers(load_config())})
+    return ["all", *SCOPES, *names]
+
+
+def completion(parser, line):
+    if line is None:
+        print(bash_completion(parser), end="")
+    else:
+        print(*option_values(line), sep="\n")
     return 0
 
 
@@ -200,8 +354,8 @@ def main(argv=None):
         "or a server name (repeatable)",
     )
     cmd.add_argument(
-        "-d",
-        "--dry-run",
+        "-n",
+        "--no-run",
         action="store_true",
         help="print roots without writing the config file",
     )
@@ -209,6 +363,12 @@ def main(argv=None):
     trust.add_parser("purge", help="remove all project entries").set_defaults(
         func=trust_purge
     )
+
+    cmd = groups.add_parser("completion", help="print a bash completion script")
+    cmd.add_argument(
+        "line", nargs="?", help="print the values for the option at the end of LINE"
+    )
+    cmd.set_defaults(func=lambda args: completion(parser, args.line))
 
     args = parser.parse_args(argv)
     try:

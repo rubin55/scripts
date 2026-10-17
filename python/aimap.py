@@ -20,13 +20,13 @@ cached in ~/.cache/aimap for 24 hours; --update fetches them again.
 
 By default each cell holds one blended price, weighting cache hit,
 input and output tokens 7:2:1, the mix Artificial Analysis states for
-its blended price. --ratio sets another weighting: three terms keep
-the cache share, two drop it, so --ratio 3:1 is the older input to
-output convention and --ratio 15:1 matches the traffic OpenRouter
+its blended price. --blend sets another weighting: three terms keep
+the cache share, two drop it, so --blend 3:1 is the older input to
+output convention and --blend 15:1 matches the traffic OpenRouter
 reports across its own platform. Where no cache price is known the
 input price stands in for it, marked with a tilde.
 
---verbose shows the three prices side by side instead of the blend.
+--blend 0, false or disabled shows the three prices side by side.
 
 Under each provider name is the credit left on that account, where it
 serves one. A few known paths are tried and the first number that
@@ -98,13 +98,14 @@ Config format:
   scores = "..."   # optional, the name evaluators like artificialanalysis.ai use for this model
 
 Usage:
-  aimap.py [-v | -r 15:1] [-s price] [-e high] [-k 90] [-b EUR] [-u]
-           [--no-fx] [--no-color] [-t 20] [-c FILE]
+  aimap.py [-v] [-b 15:1] [-s price] [-e high] [-k 90] [-c USD]
+           [-t 20] [-f FILE] [-n] [-u]
 """
 
 import argparse
 import glob
 import json
+import logging
 import math
 import os
 import shutil
@@ -113,13 +114,12 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
-
-import tomllib
+from datetime import UTC, datetime, timedelta
 
 CONFIG = os.path.expanduser("~/.aimap.toml")
 CACHE = os.path.expanduser("~/.cache/aimap")
@@ -157,6 +157,7 @@ GUESSED = "~"
 MEASURED = "*"
 ONLY = "+"
 MIN_WIDTH = 5
+log = logging.getLogger(__name__)
 
 # Energy billed accounts are priced from the usage api. The window it
 # serves is capped, so history is walked in chunks of that size.
@@ -205,8 +206,16 @@ def load_config(path):
         return tomllib.load(f)
 
 
-def fetch_json(url, timeout, token=None, user_agent=USER_AGENT, auth_header=None,
-               extra=None, body=None, retries=1):
+def fetch_json(
+    url,
+    timeout,
+    token=None,
+    user_agent=USER_AGENT,
+    auth_header=None,
+    extra=None,
+    body=None,
+    retries=1,
+):
     """GET, or POST when there is a body, waiting out a rate limit."""
     headers = {"Accept": "application/json", "User-Agent": user_agent}
     if token and auth_header and auth_header.lower() != "authorization":
@@ -226,7 +235,7 @@ def fetch_json(url, timeout, token=None, user_agent=USER_AGENT, auth_header=None
         except urllib.error.HTTPError as e:
             if e.code == 429 and attempt < retries - 1:
                 delay = number(e.headers.get("Retry-After")) or 2**attempt
-                note(f"  rate limited, waiting {delay:.0f}s")
+                log.info(f"  rate limited, waiting {delay:.0f}s")
                 time.sleep(min(delay, 60))
                 continue
             try:
@@ -465,7 +474,7 @@ def cached_json(name, url, timeout, max_age, valid, source=None, fetch=fetch_jso
     if err or not valid(payload):
         return None, err or "unexpected response"
     cache_write(name, payload)
-    note(f"{name}: fetched")
+    log.info(f"{name}: fetched")
     return payload, None
 
 
@@ -593,7 +602,7 @@ def get_balance(provider, timeout, max_age):
     cached = cache_read(f"balance-{name}", max_age)
     if isinstance(cached, dict) and "balance" in cached:
         return cached["balance"], cached.get("currency") or "USD"
-    note(f"{name}: fetching balance")
+    log.info(f"{name}: fetching balance")
     base_url = provider.get("base_url")
     found = None
     if provider.get("balance_cookie"):
@@ -635,11 +644,6 @@ def balances(providers, timeout, max_age, base, rates):
             None if value is None or not rate else value / rate
         )
     return credit
-
-
-def note(msg):
-    """Progress for the long running fetches, so -u is not silent."""
-    print(msg, file=sys.stderr)
 
 
 def fetch_window(base_url, path, token, start, end, timeout):
@@ -690,9 +694,10 @@ def update_usage(provider, cached, timeout):
     def merge(found):
         added = sum(1 for r in found if r.get("request_id") not in rows)
         rows.update({r["request_id"]: r for r in found if "request_id" in r})
-        note(f"{name}: {len(found)} requests, {added} new")
+        log.info(f"{name}: {len(found)} requests, {added} new")
+
     span = timedelta(days=USAGE_DAYS)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # Forward from the newest row held, or the whole window when the
     # cache is empty.
@@ -702,7 +707,7 @@ def update_usage(provider, cached, timeout):
     start = now - span
     if newest:
         start = max(start, datetime.fromisoformat(newest) - timedelta(minutes=5))
-    note(f"{name}: fetching usage since {start:%Y-%m-%d %H:%M}")
+    log.info(f"{name}: fetching usage since {start:%Y-%m-%d %H:%M}")
     fresh, method, err = fetch_window(base_url, path, token, start, now, timeout)
     if err:
         warn(f"{name}: usage api: {err}")
@@ -716,7 +721,7 @@ def update_usage(provider, cached, timeout):
     empty = 0
     while not cached.get("complete") and empty < USAGE_EMPTY_STOP:
         probe = walked - span
-        note(f"{name}: walking back to {probe:%Y-%m-%d}")
+        log.info(f"{name}: walking back to {probe:%Y-%m-%d}")
         older, _, err = fetch_window(base_url, path, token, probe, walked, timeout)
         if err:
             warn(f"{name}: usage api: {err}")
@@ -729,7 +734,7 @@ def update_usage(provider, cached, timeout):
         merge(older)
     complete = cached.get("complete") or empty >= USAGE_EMPTY_STOP
     if complete and not cached.get("complete"):
-        note(f"{name}: reached the start of history")
+        log.info(f"{name}: reached the start of history")
 
     return {
         "fetched": now.isoformat(timespec="seconds"),
@@ -1005,8 +1010,17 @@ def listed_currency(index):
 
 
 def build_rows(
-    models, results, catalogs, scores, shares, dates,
-    measured, base, rates, missing, weights=None,
+    models,
+    results,
+    catalogs,
+    scores,
+    shares,
+    dates,
+    measured,
+    base,
+    rates,
+    missing,
+    weights=None,
 ):
     """One row per model, with metadata and a cell per provider."""
     rows = []
@@ -1194,18 +1208,17 @@ def render(rows, headers, credits, use_color, total=""):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Compare model prices per provider.")
     ap.add_argument(
-        "-c", "--config", default=CONFIG, help=f"config file, default: {CONFIG}"
-    )
-    ap.add_argument("-b", "--base", default="USD", help="currency to show prices in")
-    ap.add_argument("--no-fx", action="store_true", help="do not convert currencies")
-    ap.add_argument(
-        "--no-color", action="store_true", help="print without the green and red"
+        "-f", "--file", default=CONFIG, help=f"config file, default: {CONFIG}"
     )
     ap.add_argument(
-        "-r",
-        "--ratio",
+        "-c", "--currency", default="USD", help="currency to show prices in"
+    )
+    ap.add_argument(
+        "-b",
+        "--blend",
         default=None,
-        help=f"token mix for the blend, cache:input:output, default: {DEFAULT_RATIO}",
+        help="token mix for the blend, cache:input:output, or 0 for split "
+        f"prices; default: {DEFAULT_RATIO}",
     )
     ap.add_argument(
         "-s",
@@ -1235,7 +1248,7 @@ def main(argv=None):
         "-v",
         "--verbose",
         action="store_true",
-        help="show input, output and cache prices instead of the blend",
+        help="show the legend and explanations",
     )
     ap.add_argument(
         "-t",
@@ -1245,17 +1258,23 @@ def main(argv=None):
         help="seconds to wait on one request, default: 20",
     )
     ap.add_argument(
+        "-n",
+        "--no-color",
+        action="store_true",
+        help="don't use color ansi codes when printing table",
+    )
+    ap.add_argument(
         "-u", "--update", action="store_true", help=f"ignore the cache in {CACHE}"
     )
     args = ap.parse_args(argv)
 
     try:
-        cfg = load_config(args.config)
+        cfg = load_config(args.file)
     except OSError as e:
-        print(f"error: cannot read {args.config}: {e}", file=sys.stderr)
+        print(f"error: cannot read {args.file}: {e}", file=sys.stderr)
         return 2
     except tomllib.TOMLDecodeError as e:
-        print(f"error: bad TOML in {args.config}: {e}", file=sys.stderr)
+        print(f"error: bad TOML in {args.file}: {e}", file=sys.stderr)
         return 2
 
     providers = [p for p in cfg.get("model_providers", []) if isinstance(p, dict)]
@@ -1265,21 +1284,34 @@ def main(argv=None):
         print("error: config needs model_providers and models", file=sys.stderr)
         return 2
 
-    base = args.base.upper()
-    ratio = args.ratio or DEFAULT_RATIO
-    weights = None if args.verbose else parse_ratio(ratio)
-    if weights is None and not args.verbose:
-        print(f"error: bad ratio {ratio!r}, expected 7:2:1 or 3:1", file=sys.stderr)
+    base = args.currency.upper()
+    if len(base) != 3 or not base.isalpha():
+        print(
+            f"error: bad currency {args.currency!r}, expected a code like EUR",
+            file=sys.stderr,
+        )
+        return 2
+    ratio = (args.blend or DEFAULT_RATIO).strip()
+    split = ratio.lower() in ("false", "disabled", "off", "no") or number(ratio) == 0
+    weights = None if split else parse_ratio(ratio)
+    if weights is None and not split:
+        print(f"error: bad blend {ratio!r}, expected 7:2:1, 3:1 or 0", file=sys.stderr)
         return 2
     if not 0 < args.keep <= 100:
-        print(f"error: bad keep {args.keep:g}, expected above 0, up to 100", file=sys.stderr)
+        print(
+            f"error: bad keep {args.keep:g}, expected above 0, up to 100",
+            file=sys.stderr,
+        )
         return 2
-    if args.ratio and args.verbose:
-        warn("--ratio has no effect with --verbose")
     max_age = 0 if args.update else CACHE_TTL
+    logging.basicConfig(
+        format="%(message)s",
+        level=logging.INFO if args.verbose and args.update else logging.WARNING,
+        force=True,
+    )
     if args.update:
-        note("updating")
-    rates = {base: 1.0} if args.no_fx else fx_rates(base, args.timeout, max_age)
+        log.info("updating")
+    rates = fx_rates(base, args.timeout, max_age)
     catalog = models_dev(args.timeout, max_age)
     catalogs = {
         str(p.get("name", "?")): index_catalog(
@@ -1318,58 +1350,70 @@ def main(argv=None):
     missing = set()
     rows = sort_rows(
         build_rows(
-            models, results, catalogs, scores, shares, dates,
-            measured, base, rates, missing, weights,
+            models,
+            results,
+            catalogs,
+            scores,
+            shares,
+            dates,
+            measured,
+            base,
+            rates,
+            missing,
+            weights,
         ),
         args.sort,
     )
     use_color = not args.no_color and sys.stdout.isatty()
     trail = (["int", "sel"] if scores else []) + (["rel"] if dates else [])
 
-    if weights:
-        mix = "cache, input, output" if len(weights) == 3 else "input, output"
-        shape = f"blended {ratio} {mix}"
-    elif any(
-        c[1] and len(c[1]) > 2 and c[1][2] is not None for *_, r in rows for c in r
-    ):
-        shape = "in, out, cached"
-    else:
-        shape = "in, out"
-    print(f"prices per million tokens in {base} ({shape})")
-    if scores and args.effort:
-        print(
-            f"int is at effort level {args.effort}, "
-            "or the closest level below it"
-        )
-    elif scores:
-        print("int is at the sel effort level")
-    if scores:
-        print(
-            "sel is a suggested effort level that "
-            f"gives {args.keep:g}% of the top score"
-        )
-    if dates:
-        print("rel is the month the model was released")
-    print(
-        f"{paint('green', GREEN, use_color)} = lowest, "
-        f"{paint('red', RED, use_color)} = highest, "
-        f"{paint('blue', BLUE, use_color)} = free\n"
-    )
-    headers = [os.path.basename(sys.argv[0])] + [name for name, _, _ in results] + trail
+    headers = ["model/provider"] + [name for name, _, _ in results] + trail
     credits = [fmt_balance(credit.get(name)) for name, _, _ in results]
     known = [credit.get(name) for name, _, _ in results]
     known = [v for v in known if v is not None]
     total = fmt_balance(sum(known)) if known else ""
     seen = render(rows, headers, credits, use_color, total)
     only = any(str(row[1][1]).endswith(ONLY) for row in rows)
-    if seen or only:
+    print(
+        f"{paint('green', GREEN, use_color)} = lowest, "
+        f"{paint('red', RED, use_color)} = highest, "
+        f"{paint('blue', BLUE, use_color)} = free"
+    )
+    if args.verbose:
+        if weights:
+            mix = "cache, input, output" if len(weights) == 3 else "input, output"
+            shape = f"blended {ratio} {mix}"
+        elif any(
+            c[1] and len(c[1]) > 2 and c[1][2] is not None for *_, r in rows for c in r
+        ):
+            shape = "in, out, cached"
+        else:
+            shape = "in, out"
         print()
-    if MEASURED in seen:
-        print(f"{MEASURED} rate measured from actual traffic instead of estimate")
-    if GUESSED in seen:
-        print(f"{GUESSED} no cache price listed, estimated from aa, else input price")
-    if only:
-        print(f"{ONLY} suggested effort level is the only effort level aa tested")
+        if MEASURED in seen:
+            print(
+                f"{MEASURED} means the rate is measured from actual traffic, not estimated"
+            )
+        if GUESSED in seen:
+            print(
+                f"{GUESSED} means no cache price is listed: estimated from aa, else the input price"
+            )
+        if only:
+            print(f"{ONLY} means aa tested only this effort level")
+        print(f"- prices per 1M tokens in {base} ({shape})")
+        if scores:
+            print(
+                f"- sel is a suggested effort level that gives "
+                f"{args.keep:g}% of the top score"
+            )
+        if dates:
+            print("- rel is the month the model was released")
+        if scores and args.effort:
+            print(
+                f"- int is at effort level {args.effort}, or the closest level below it"
+            )
+        elif scores:
+            print("- int is at the sel effort level")
     for currency in sorted(missing):
         warn(f"no {base} rate for {currency}, shown unconverted")
     return 0
