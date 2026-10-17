@@ -31,6 +31,10 @@ def config_paths():
     return [config_path(), *profile_paths()]
 
 
+def trusted_dirs_path():
+    return Path("~/.trusted-dirs.toml").expanduser()
+
+
 def load_toml(path):
     with open(path, "rb") as f:
         return tomllib.load(f)
@@ -602,7 +606,7 @@ def trust_list(_):
 
 
 def trust_generate(args):
-    entries = deduplicate(expand_trusted_dirs(codex_home() / "trusted-dirs.toml"))
+    entries = deduplicate(expand_trusted_dirs(trusted_dirs_path()))
     if args.dry_run:
         for directory, level in entries:
             print(f"{directory} -> {level}")
@@ -636,7 +640,7 @@ BASH_COMPLETION = """\
 _codex_util() {
     local cur=${COMP_WORDS[COMP_CWORD]} prev=${COMP_WORDS[COMP_CWORD-1]}
     local line=${COMP_LINE:0:COMP_POINT} path="" word words
-    local re=' (--provider|--model|--effort) +([^ ]*)$'
+    local re=' (-p|--provider|-m|--model|-e|--effort) +([^ ]*)$'
     if [[ $line =~ $re ]]; then
         local value=${BASH_REMATCH[2]}
         words=$(%(prog)s completion "$line" 2>/dev/null)
@@ -686,7 +690,8 @@ def bash_completion(parser):
 
 def option_values(line):
     # Return the values for the option before the last word of line.
-    words = line.split()
+    long = {"-p": "--provider", "-m": "--model", "-e": "--effort"}
+    words = [long.get(word, word) for word in line.split()]
     if not line[-1:].isspace():
         words.pop()
     opts = dict(pairwise(words))
@@ -719,25 +724,29 @@ def main(argv=None):
     catalogs_dir = str(codex_home() / "model-catalogs")
     catalogs = group("model-catalogs", "model catalog files per provider")
     cmd = catalogs.add_parser("list", help="list the models in each catalog")
-    cmd.add_argument("--dir", default=catalogs_dir)
+    cmd.add_argument("-D", "--dir", default=catalogs_dir)
     cmd.set_defaults(func=catalogs_list)
     cmd = catalogs.add_parser(
         "update", help="update model catalogs from configured providers"
     )
-    cmd.add_argument("--dir", default=catalogs_dir)
+    cmd.add_argument("-D", "--dir", default=catalogs_dir)
     cmd.add_argument(
+        "-p",
         "--provider",
         action="append",
         default=[],
         help="only this provider (repeatable)",
     )
-    cmd.add_argument("--timeout", type=int, default=20)
-    cmd.add_argument("--client-version")
-    cmd.add_argument("--codex-bin", default="codex")
+    cmd.add_argument("-t", "--timeout", type=int, default=20)
+    cmd.add_argument("-c", "--client-version")
+    cmd.add_argument("-b", "--binary", default="codex")
     cmd.add_argument(
-        "--dry-run", action="store_true", help="fetch and translate, do not write files"
+        "-d",
+        "--dry-run",
+        action="store_true",
+        help="fetch and translate, do not write files",
     )
-    cmd.add_argument("--quiet", action="store_true")
+    cmd.add_argument("-q", "--quiet", action="store_true")
     cmd.set_defaults(func=catalogs_update)
 
     profiles = group("profiles", "profile config files")
@@ -745,9 +754,13 @@ def main(argv=None):
     cmd = profiles.add_parser(
         "set", help="set the model and effort of the profile that uses a provider"
     )
-    cmd.add_argument("--provider", required=True)
-    cmd.add_argument("--model", required=True, help="a model in the provider catalog")
-    cmd.add_argument("--effort", required=True, help="an effort level of the model")
+    cmd.add_argument("-p", "--provider", required=True)
+    cmd.add_argument(
+        "-m", "--model", required=True, help="a model in the provider catalog"
+    )
+    cmd.add_argument(
+        "-e", "--effort", required=True, help="an effort level of the model"
+    )
     cmd.set_defaults(func=profiles_set)
 
     trust = group("trust-roots", "project trust entries")
@@ -755,9 +768,10 @@ def main(argv=None):
         "list", help="list trust roots found in all Codex config files"
     ).set_defaults(func=trust_list)
     cmd = trust.add_parser(
-        "generate", help="generate trust roots from trusted-dirs.toml"
+        "generate", help="generate trust roots from ~/.trusted-dirs.toml"
     )
     cmd.add_argument(
+        "-d",
         "--dry-run",
         action="store_true",
         help="print roots without writing config files",
