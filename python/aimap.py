@@ -4,7 +4,8 @@
 Reads ~/.aimap.toml, fetches <base_url>/models from every provider
 using a token from tipi.py, and prints one column per provider with
 the price per million tokens of each configured model. Per row the
-lowest price is green, the highest red. A free price is blue.
+lowest price is green and the highest red, unless several cells
+share it. A free price is blue.
 
 Some providers serve a model without publishing its price, and many
 state no cache price at all. Those fall back to what models.dev holds
@@ -1169,13 +1170,17 @@ def render(rows, headers, credits, use_color, total=""):
     for row, cells, texts in zip(rows, grid, facts):
         # Rank on the printed value, so equal-looking prices from
         # providers that differ in the last decimals get one color.
-        # Free prices are left out of the ranking.
+        # Free prices are left out of the ranking, and a lowest or
+        # highest price shared by several cells stays plain.
         numbers = [c for c in cells if isinstance(c, list)]
         extremes = []
         for j in range(max(map(len, numbers), default=0)):
-            values = {float(t) for n in numbers if (t := n[j])} - {0.0}
-            ends = (min(values), max(values)) if len(values) > 1 else (None, None)
-            extremes.append(ends)
+            values = sorted(float(t) for n in numbers if (t := n[j]) and float(t))
+            low = high = None
+            if len(values) > 1:
+                low = values[0] if values[0] < values[1] else None
+                high = values[-1] if values[-1] > values[-2] else None
+            extremes.append((low, high))
         out = [row[0].ljust(widths[0])]
         for cell, (*_, mark), (size, mark_width, span, indent), width in zip(
             cells, row[3], layout, widths[1:]
@@ -1377,7 +1382,8 @@ def main(argv=None):
     print(
         f"{paint('green', GREEN, use_color)} = lowest, "
         f"{paint('red', RED, use_color)} = highest, "
-        f"{paint('blue', BLUE, use_color)} = free"
+        f"{paint('blue', BLUE, use_color)} = free, "
+        "a shared extreme stays plain"
     )
     if args.verbose:
         if weights:
