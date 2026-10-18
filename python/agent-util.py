@@ -25,6 +25,10 @@ AGENTS = {
         "prompt": ".codex/AGENTS.md",
         "skills": ".agents/skills",
     },
+    "maki": {
+        "prompt": ".config/maki/AGENTS.md",
+        "skills": ".agents/skills",
+    },
     "opencode": {
         "prompt": ".config/opencode/AGENTS.md",
         "skills": ".config/opencode/skills",
