@@ -406,8 +406,8 @@ def catalogs_update(args):
         print("error: no matching providers", file=sys.stderr)
         return 2
 
-    client_version = args.client_version or codex_client_version(args.codex_bin)
-    base_instructions = bundled_base_instructions(args.codex_bin)
+    client_version = args.client_version or codex_client_version(args.binary)
+    base_instructions = bundled_base_instructions(args.binary)
     if not base_instructions:
         print("warn: no bundled instructions, using stub", file=sys.stderr)
 
