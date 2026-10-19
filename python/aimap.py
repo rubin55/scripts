@@ -36,7 +36,10 @@ are held for an hour, and refreshed by --update.
 
 A configured evaluator adds an int column, holding its intelligence
 index for the model. The evaluator finds a model by its scores name,
-else by its name. Aliases only match provider names. Where it rates
+else by its name. Aliases only match provider names, or the upstream
+model a provider names in metadata.huggingface_id, as Neuralwatt does
+for aliases like nw-flash. Flex tiers are left out of that, as they
+serve the same model at a discount. Where it rates
 the model at more than one effort level, a sel column shows the
 lowest level that keeps a share of the best score, 95 percent unless
 --keep sets another, and int shows the score at that level. --effort
@@ -355,6 +358,19 @@ def model_items(payload):
     return None
 
 
+def upstream_slugs(entry):
+    """Slugs of the upstream model an entry names, unless flex tier."""
+    meta = entry.get("metadata")
+    if not isinstance(meta, dict):
+        return set()
+    upstream = meta.get("huggingface_id")
+    pricing = meta.get("pricing")
+    tier = pricing.get("service_tier") if isinstance(pricing, dict) else None
+    if not isinstance(upstream, str) or tier == "flex":
+        return set()
+    return slugs(upstream)
+
+
 def index_models(payload):
     """Map every slug a provider serves to its prices."""
     items = [e for e in (model_items(payload) or []) if isinstance(e, dict)]
@@ -364,7 +380,7 @@ def index_models(payload):
         if not isinstance(model_id, str):
             continue
         price = price_of(entry)
-        for slug in slugs(model_id):
+        for slug in slugs(model_id) | upstream_slugs(entry):
             index.setdefault(slug, []).append(price)
     return index
 
@@ -1382,8 +1398,7 @@ def main(argv=None):
     print(
         f"{paint('green', GREEN, use_color)} = lowest, "
         f"{paint('red', RED, use_color)} = highest, "
-        f"{paint('blue', BLUE, use_color)} = free, "
-        "a shared extreme stays plain"
+        f"{paint('blue', BLUE, use_color)} = free"
     )
     if args.verbose:
         if weights:
