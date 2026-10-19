@@ -38,6 +38,11 @@ function apply_theme() {
     ln -sf "${relative_path}/${theme}.toml" "${config_dir}/${mode}_theme.toml"
     touch "${themes_dir}/${theme}.toml"
   fi
+
+  # Pass colors along to tmux panes too.
+  if command -v tmux-refresh.sh > /dev/null; then
+    tmux-refresh.sh set "$mode"
+  fi
 }
 
 function get_theme() {
