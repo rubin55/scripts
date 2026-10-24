@@ -77,12 +77,7 @@ Config format:
   models_dev = "..."   # optional, its id on models.dev if it differs
   pricing = "energy"   # optional, default "token"
   usage_path = "..."   # optional, default /usage/requests
-  balance_path = "..." # optional, where credit left is served
-  # Or, for a site that only shows credit behind a login:
-  balance_login = ["tipi-key", "user"]   # password from tipi.py
-  balance_token_url = "..."              # trades password for a token
-  balance_account_url = "..."            # account page the token reads
-  balance_field = "credits"              # its key in that page
+  balance_path = "..." # optional, path or url where credit left is served
   # Or, for credit shown only to a logged-in browser:
   balance_cookie = "host/name"           # session cookie from Firefox
   balance_api_url = "..."                # json endpoint it unlocks
@@ -144,6 +139,7 @@ BALANCE_KEYS = [
     "balance_usd",
     "credit_balance",
     "balance",
+    "credits",
 ]
 # Token mix for a blended price, cache hit to input to output. This
 # is the ratio Artificial Analysis states for its blended figure.
@@ -527,40 +523,6 @@ def balance_of(payload):
     return None
 
 
-def login_balance(provider, timeout):
-    """Balance from a site login, for accounts with no key-auth api.
-
-    The account password is traded for a bearer token, which then
-    reads the account page. Configured with balance_login, the tipi
-    key and user for the password.
-    """
-    login = provider.get("balance_login")
-    if not isinstance(login, list) or len(login) < 2:
-        return None
-    password = tipi_secret([str(k) for k in login])
-    if not password:
-        warn(f"{provider.get('name', '?')}: no balance login password")
-        return None
-    token_url = str(provider.get("balance_token_url") or "")
-    account_url = str(provider.get("balance_account_url") or "")
-    field = str(provider.get("balance_field") or "credits")
-    if not token_url or not account_url:
-        return None
-    reply, err = fetch_json(
-        token_url, timeout, body={"username": login[1], "password": password}
-    )
-    token = reply.get("access") if isinstance(reply, dict) else None
-    if err or not token:
-        warn(f"{provider.get('name', '?')}: balance login failed: {err or 'no token'}")
-        return None
-    payload, err = fetch_json(account_url, timeout, token)
-    value = number(payload.get(field)) if isinstance(payload, dict) else None
-    if not isinstance(payload, dict) or value is None:
-        warn(f"{provider.get('name', '?')}: no {field} in account: {err or 'absent'}")
-        return None
-    return value, str(payload.get("currency") or "USD").upper()
-
-
 def firefox_cookie(spec):
     """Value of a host/name cookie from the Firefox profile, or None."""
     host, _, name = str(spec).partition("/")
@@ -624,16 +586,15 @@ def get_balance(provider, timeout, max_age):
     found = None
     if provider.get("balance_cookie"):
         found = cookie_balance(provider, timeout)
-    elif provider.get("balance_login"):
-        found = login_balance(provider, timeout)
     elif base_url:
         token, err = get_token(provider)
         if not err:
             configured = provider.get("balance_path")
             paths = [str(configured)] if configured else BALANCE_PATHS
             for path in paths:
+                url = path if "://" in path else str(base_url).rstrip("/") + path
                 payload, err = fetch_json(
-                    str(base_url).rstrip("/") + path,
+                    url,
                     timeout,
                     token,
                     str(provider.get("user_agent") or USER_AGENT),
