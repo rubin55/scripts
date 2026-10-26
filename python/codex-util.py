@@ -77,8 +77,16 @@ def print_table(headers, rows):
 # copied from the bundled catalog so entries keep the builtin prompt.
 # Models without effort levels or a context window get them from
 # models.dev, if it has the same provider key and model id.
+# OpenAI models in the bundled catalog, served as <slug> or
+# openai/<slug>, get its tool settings, such as the apply_patch tool.
 
 MODELS_DEV_URL = "https://models.dev/api.json"
+BUNDLED_TOOL_KEYS = (
+    "apply_patch_tool_type",
+    "shell_type",
+    "web_search_tool_type",
+    "truncation_policy",
+)
 
 EFFORT_DESCRIPTIONS = {
     "minimal": "Fastest responses with minimal reasoning",
@@ -130,17 +138,21 @@ def codex_client_version(codex_bin):
     return "0.155.1"
 
 
-def bundled_base_instructions(codex_bin):
+def bundled_models(codex_bin):
     out, err = run_capture([codex_bin, "debug", "models", "--bundled"])
     if not out:
         print(f"warn: cannot read bundled catalog: {err}", file=sys.stderr)
-        return None
+        return []
     try:
         data = json.loads(out)
     except json.JSONDecodeError as e:
         print(f"warn: bundled catalog not JSON: {e}", file=sys.stderr)
-        return None
-    for m in data.get("models", []):
+        return []
+    return data.get("models", [])
+
+
+def bundled_base_instructions(bundled):
+    for m in bundled:
         if m.get("base_instructions"):
             return m["base_instructions"]
         mm = m.get("model_messages") or {}
@@ -353,6 +365,18 @@ def add_models_dev(models, provider, dev):
     return count
 
 
+def add_bundled_tools(models, bundled):
+    # Set the tool settings of bundled OpenAI models, return how many.
+    tools = {m.get("slug"): m for m in bundled}
+    count = 0
+    for m in models:
+        info = tools.get(str(m.get("slug", "")).removeprefix("openai/"))
+        if info:
+            m.update({k: info[k] for k in BUNDLED_TOOL_KEYS if k in info})
+            count += 1
+    return count
+
+
 def read_models(path):
     with open(path) as f:
         return json.load(f).get("models", [])
@@ -407,7 +431,8 @@ def catalogs_update(args):
         return 2
 
     client_version = args.client_version or codex_client_version(args.binary)
-    base_instructions = bundled_base_instructions(args.binary)
+    bundled = bundled_models(args.binary)
+    base_instructions = bundled_base_instructions(bundled)
     if not base_instructions:
         print("warn: no bundled instructions, using stub", file=sys.stderr)
 
@@ -433,6 +458,9 @@ def catalogs_update(args):
         added = add_models_dev(models, key, dev)
         if added:
             label += f", {added} values from models.dev"
+        tooled = add_bundled_tools(models, bundled)
+        if tooled:
+            label += f", {tooled} with bundled tools"
         models.sort(key=lambda m: m.get("slug", ""))
         for i, m in enumerate(models):
             m["priority"] = i
