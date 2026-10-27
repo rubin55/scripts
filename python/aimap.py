@@ -34,20 +34,35 @@ serves one. A few known paths are tried and the first number that
 looks like a balance is kept, so most providers need no config. These
 are held for an hour, and refreshed by --update.
 
-A configured evaluator adds an int column, holding its intelligence
-index for the model. The evaluator finds a model by its scores name,
-else by its name. Aliases only match provider names, or the upstream
-model a provider names in metadata.huggingface_id, as Neuralwatt does
-for aliases like nw-flash. Flex tiers are left out of that, as they
+A configured evaluator adds a score column, holding its intelligence
+index for the model. --score coding shows its coding index instead,
+and int and code are short forms. For artificial-analysis, coding
+means its engineering index. A model with no such score shows a dash.
+The evaluator finds a model by its scores name, else by its name. A
+scores table sets that name per evaluator, so the others use the
+name. Aliases only match provider names, or the upstream model a
+provider names in metadata.huggingface_id, as Neuralwatt does for
+aliases like nw-flash. Flex tiers are left out of that, as they
 serve the same model at a discount. Where it rates
 the model at more than one effort level, a sel column shows the
 lowest level that keeps a share of the best score, 95 percent unless
---keep sets another, and int shows the score at that level. --effort
-shows int at a set effort level instead, or the closest level below
+--keep sets another, and score shows the score at that level. --effort
+shows score at a set effort level instead, or the closest level below
 it that the evaluator rates. A model the evaluator rates at no named
 level keeps its one score, unless --effort sets a level below max,
 as its score at a lower level is unknown.
 The rel column shows the month the model was released.
+
+Scores of two evaluators are not comparable, so aimap uses one: the
+first in the config, or the one --model-evaluator names. An evaluator
+has a type: artificial-analysis, the default, or benchlm. BenchLM has
+no prices. It finds a model by slug or display name, as a slug can
+lack a date. Its release dates are in a catalog that costs 10 more
+reads, so rel shows dashes. It rates no effort levels, so sel shows
+dashes and --effort has no effect. Its free plan has 250 reads a
+month. One fetch takes 5 reads, 3 for the intelligence ranking and 2
+for the coding ranking. The cache keeps it for 24 hours, also when a
+ranking failed to come in, as each read counts.
 
 A provider set to pricing = "energy" bills the power its GPUs draw,
 not tokens, so its listed token prices are not what the account pays.
@@ -61,13 +76,12 @@ The usage history is cached in ~/.cache/aimap and never expires,
 since past requests do not change. --update tops it up and walks
 further back, a window at a time, until the history runs out.
 
---sort name orders rows alphabetically, --sort price by the cheapest
-provider in each row, using the first number a cell shows. --sort int
-puts the highest score first, spelled out as intelligence if you
-prefer. --sort date puts the newest release first. Without it rows
-keep the order of the config.
+--order name orders rows alphabetically, --order price by the cheapest
+provider in each row, using the first number a cell shows. --order
+score puts the highest score first. --order date puts the newest
+release first. Without it rows keep the order of the config.
 
---limit keeps rows that match field filters such as "int=40+",
+--limit keeps rows that match field filters such as "score=40+",
 "price=0.10-" or "name=*deepseek*". Separate filters with commas.
 A numeric value with - means that value or less, and + means that
 value or higher. Price uses the cheapest paid cell, or a free cell
@@ -92,20 +106,29 @@ Config format:
   balance_headers = { x-org-id = "..." } # optional request headers
   balance_scale = 1e8                    # optional currency divisor
 
-  [[model_evaluators]]
+  [[model_evaluators]]   # the first one is the default
   name = "artificial-analysis"                       # also the cache file
   base_url = "https://artificialanalysis.ai/api/v2/language/models/free"
   auth_keys = ["artificialanalysis", "default-api-token"]
   auth_header = "x-api-key"   # optional, default is Authorization
 
+  [[model_evaluators]]
+  name = "benchlm"
+  type = "benchlm"            # required, default is "artificial-analysis"
+  base_url = "https://data.benchlm.ai/v1"
+  auth_keys = ["benchlm", "default-api-token"]
+
   [[models]]
   name = "deepseek-v4.1-flash"
   aliases = ["deepseek-v4-1-flash"]
-  scores = "..."   # optional, the name evaluators like artificialanalysis.ai use for this model
+  scores = "..."   # optional, the name evaluators know this model by
+  # Or, per evaluator name, where the others use the name:
+  scores = { artificial-analysis = "..." }
 
 Usage:
-  aimap.py [-v] [-b 15:1] [-s price] [-e high] [-k 90] [-c USD]
-           [-l "int=40+,price=0.10-"] [-t 20] [-f FILE] [-n] [-u]
+  aimap.py [-v] [-b 15:1] [-o price] [-s coding] [-e high] [-k 90]
+           [-m benchlm] [-c USD] [-l "score=40+,price=0.10-"] [-t 20]
+           [-f FILE] [-n] [-u]
 """
 
 import argparse
@@ -156,6 +179,21 @@ DEFAULT_RATIO = "7:2:1"
 # Effort levels an evaluator rates a model at, lowest first.
 EFFORTS = ["low", "medium", "high", "xhigh", "max"]
 DEFAULT_KEEP = 95.0
+# Names that pick a score, and the kind of score each one stands for.
+SCORE_KINDS = {
+    "int": "intelligence",
+    "intelligence": "intelligence",
+    "code": "coding",
+    "coding": "coding",
+}
+# Most rows BenchLM serves in one read. A free plan has few reads.
+BENCHLM_PAGE = 100
+# Most reads of one ranking, in case its pages do not end.
+BENCHLM_PAGES = 10
+# Tries of one read when BenchLM limits the rate.
+BENCHLM_RETRIES = 3
+# The BenchLM ranking that each kind of score is read from.
+SURFACES = {"intelligence": "overall", "coding": "coding"}
 
 RESET = "\033[0m"
 RED = "\033[31m"
@@ -262,12 +300,84 @@ def fetch_pages(url, timeout, *args):
     payload, err = fetch_json(url, timeout, *args)
     if not isinstance(payload, dict):
         return payload, err
-    for n in range(2, payload.get("pagination", {}).get("total_pages", 1) + 1):
+    for n in range(2, (payload.get("pagination") or {}).get("total_pages", 1) + 1):
         page, err = fetch_json(f"{url}?page={n}", timeout, *args)
         if not isinstance(page, dict):
             return None, err or "unexpected response"
         payload["data"] += page.get("data") or []
     return payload, None
+
+
+def fetch_ranking(url, surface, timeout, *args):
+    """GET the rows of one BenchLM ranking, and the error if it stopped."""
+    items, offset = [], 0
+    for _ in range(BENCHLM_PAGES):
+        query = urllib.parse.urlencode(
+            {"surface": surface, "limit": BENCHLM_PAGE, "offset": offset}
+        )
+        page, err = fetch_json(
+            f"{url.rstrip('/')}/rankings/current?{query}",
+            timeout,
+            *args,
+            retries=BENCHLM_RETRIES,
+        )
+        if not isinstance(page, dict) or not isinstance(page.get("items"), list):
+            return items, err or "unexpected response"
+        items += page["items"] + (page.get("regionalItems") or [])
+        following = (page.get("pagination") or {}).get("nextOffset")
+        # An offset that does not move on would read the same page again.
+        if not isinstance(following, int) or following <= offset:
+            break
+        offset = following
+    return items, None
+
+
+def fetch_benchlm(url, timeout, *args):
+    """GET the rankings of BenchLM as a list like the one of AA."""
+    rows = {}
+    for kind, surface in SURFACES.items():
+        items, err = fetch_ranking(url, surface, timeout, *args)
+        if err:
+            # Each read counts against the plan, so keep what came in.
+            warn(f"benchlm: {surface} ranking is incomplete: {err}")
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            slug = item.get("slug") or item.get("name")
+            score = number(item.get("score"))
+            if not isinstance(slug, str) or score is None:
+                continue
+            row = rows.setdefault(
+                slug, {"slug": slug, "name": item.get("name"), "evaluations": {}}
+            )
+            # Regional rows come after the main ones, so the main score wins.
+            row["evaluations"].setdefault(f"benchlm_{kind}_index", score)
+    if not rows:
+        return None, err
+    data = list(rows.values())
+    # A name finds a model too, as a slug can lack the date a name has.
+    data += [
+        {**row, "slug": row["name"], "name": None}
+        for row in data
+        if isinstance(row["name"], str) and squash(row["name"]) != squash(row["slug"])
+    ]
+    return {"data": data}, None
+
+
+# Per evaluator type: its fetcher, score indexes, and effort levels.
+EVALUATORS = {
+    "artificial-analysis": {
+        "fetch": fetch_pages,
+        # Its coding index is obsolete, so use its engineering index.
+        "indexes": {"intelligence": "intelligence", "coding": "engineering"},
+        "efforts": True,
+    },
+    "benchlm": {
+        "fetch": fetch_benchlm,
+        "indexes": {"intelligence": "intelligence", "coding": "coding"},
+        "efforts": False,
+    },
+}
 
 
 def tipi_secret(keys):
@@ -791,10 +901,10 @@ def measure(provider, listed, currency, timeout, update):
     return index
 
 
-def score_of(evaluations):
-    """Intelligence index out of an evaluations object."""
+def score_of(evaluations, index):
+    """The named index out of an evaluations object."""
     for key, value in evaluations.items():
-        if key.endswith("intelligence_index"):
+        if key.endswith(f"{index}_index"):
             return number(value)
     return None
 
@@ -830,45 +940,52 @@ def at_effort(levels, effort):
     return levels[rated[-1]] if rated else None
 
 
-def evaluations(evaluators, timeout, max_age, keep, effort):
-    """Scores, cache-price shares and release dates from evaluators."""
+def evaluations(evaluator, timeout, max_age, keep, effort, kind):
+    """Scores, cache-price shares and release dates from an evaluator."""
+    name = str(evaluator.get("name") or "evaluator")
+    api = str(evaluator.get("type") or "artificial-analysis")
+    spec = EVALUATORS.get(api)
+    if not spec:
+        warn(f"{name}: unknown type {api}")
+        return {}, {}, {}
+    if effort and not spec["efforts"]:
+        warn(f"{name}: rates no effort levels, ignoring --effort")
+        effort = None
+    payload, err = cached_json(
+        name,
+        evaluator.get("base_url"),
+        timeout,
+        max_age,
+        lambda p: isinstance(p, dict) and isinstance(p.get("data"), list),
+        evaluator,
+        spec["fetch"],
+    )
+    if not payload:
+        warn(f"{name}: {err}")
+        return {}, {}, {}
     index, families, shares, dates = {}, {}, {}, {}
-    for evaluator in evaluators:
-        name = str(evaluator.get("name") or "evaluator")
-        payload, err = cached_json(
-            name,
-            evaluator.get("base_url"),
-            timeout,
-            max_age,
-            lambda p: isinstance(p, dict) and isinstance(p.get("data"), list),
-            evaluator,
-            fetch_pages,
-        )
-        if not payload:
-            warn(f"{name}: {err}")
+    for entry in payload["data"]:
+        if not isinstance(entry, dict):
             continue
-        for entry in payload["data"]:
-            if not isinstance(entry, dict):
-                continue
-            slug = entry.get("slug") or entry.get("id")
-            scores = entry.get("evaluations")
-            if not isinstance(slug, str) or not isinstance(scores, dict):
-                continue
-            intelligence = score_of(scores)
-            index.setdefault(squash(slug), (intelligence, None))
-            released = release_of(entry.get("release_date"))
-            if released:
-                dates.setdefault(squash(slug), released)
-            # A zero cache price next to a paid input is a placeholder.
-            price = price_of(entry)
-            if price and price[0] > 0 and price[2]:
-                shares.setdefault(squash(slug), price[2] / price[0])
-            # Variants are named base-level, the top level just base.
-            level = effort_of(str(entry.get("name") or ""))
-            if level and intelligence is not None:
-                base = squash(slug.lower().removesuffix(f"-{level}"))
-                levels = families.setdefault(base, {})
-                levels.setdefault(level, intelligence)
+        slug = entry.get("slug") or entry.get("id")
+        scores = entry.get("evaluations")
+        if not isinstance(slug, str) or not isinstance(scores, dict):
+            continue
+        score = score_of(scores, spec["indexes"][kind])
+        index.setdefault(squash(slug), (score, None))
+        released = release_of(entry.get("release_date"))
+        if released:
+            dates.setdefault(squash(slug), released)
+        # A zero cache price next to a paid input is a placeholder.
+        price = price_of(entry)
+        if price and price[0] > 0 and price[2]:
+            shares.setdefault(squash(slug), price[2] / price[0])
+        # Variants are named base-level, the top level just base.
+        level = spec["efforts"] and effort_of(str(entry.get("name") or ""))
+        if level and score is not None:
+            base = squash(slug.lower().removesuffix(f"-{level}"))
+            levels = families.setdefault(base, {})
+            levels.setdefault(level, score)
     for slug in index:
         if slug in families:
             levels = families[slug]
@@ -950,9 +1067,9 @@ def parse_limit(text):
     for item in text.split(","):
         key, sep, value = item.partition("=")
         key, value = key.strip().lower(), value.strip()
-        if not sep or not value or key not in ("name", "int", "price"):
+        if not sep or not value or key not in ("name", "score", "price"):
             raise argparse.ArgumentTypeError(
-                "expected FIELD=VALUE with FIELD set to name, int or price"
+                "expected FIELD=VALUE with FIELD set to name, score or price"
             )
         if key == "name":
             rules.append((key, fnmatch.fnmatchcase, value.casefold()))
@@ -1026,6 +1143,7 @@ def build_rows(
     scores,
     shares,
     dates,
+    rater,
     measured,
     base,
     rates,
@@ -1041,7 +1159,11 @@ def build_rows(
         ordered = [name.lower()]
         ordered += [str(a).lower() for a in model.get("aliases", [])]
         names = set(ordered) | {squash(n) for n in ordered}
-        rated_as = squash(str(model.get("scores") or name))
+        rated_as = model.get("scores") or name
+        # A scores table names the model per evaluator.
+        if isinstance(rated_as, dict):
+            rated_as = rated_as.get(rater) or name
+        rated_as = squash(str(rated_as))
         rated = scores.get(rated_as, (None, None))
         share = shares.get(rated_as)
         release = dates.get(rated_as)
@@ -1083,7 +1205,7 @@ def cheapest(row):
 
 def matches_limits(row, limits):
     """True when a row matches every limit rule."""
-    values = {"name": row[0].casefold(), "int": row[1][0], "price": cheapest(row)}
+    values = {"name": row[0].casefold(), "score": row[1][0], "price": cheapest(row)}
     return all(
         values[key] is not None and test(values[key], limit)
         for key, test, limit in limits
@@ -1101,7 +1223,7 @@ def sort_rows(rows, order):
             return value if value is not None else float("inf"), row[0]
 
         return sorted(rows, key=price)
-    if order in ("int", "intelligence"):
+    if order == "score":
 
         def rated(row):
             score = row[1][0]
@@ -1139,9 +1261,9 @@ def render(rows, headers, credits, use_color, total=""):
     n = 1 + len(credits)
     trail = headers[n:]
     facts = []
-    for _, (intelligence, sel), release, _ in rows:
+    for _, (score, sel), release, _ in rows:
         rel = release.strftime("%b'%y").lower() if release else None
-        values = {"int": intelligence, "sel": sel, "rel": rel}
+        values = {"score": score, "sel": sel, "rel": rel}
         facts.append(
             [
                 "-" if v is None else v if isinstance(v, str) else f"{v:.1f}"
@@ -1249,11 +1371,11 @@ def main(argv=None):
         f"prices; default: {DEFAULT_RATIO}",
     )
     ap.add_argument(
-        "-s",
-        "--sort",
-        choices=("name", "price", "int", "intelligence", "date"),
+        "-o",
+        "--order",
+        choices=("name", "price", "score", "date"),
         metavar="KEY",
-        help="order rows by name, price, int or date; default: config order",
+        help="order rows by name, price, score or date; default: config order",
     )
     ap.add_argument(
         "-l",
@@ -1262,16 +1384,32 @@ def main(argv=None):
         default=[],
         type=parse_limit,
         metavar="FIELD=VALUE",
-        help="keep rows that match all name, int or price filters, "
+        help="keep rows that match all name, score or price filters, "
         "separated by commas; numbers need - for up to or + for at "
         "least; * is a name wildcard",
+    )
+    ap.add_argument(
+        "-m",
+        "--model-evaluator",
+        metavar="NAME",
+        help="name of the evaluator that rates the models; "
+        "default: the first in the config",
+    )
+    ap.add_argument(
+        "-s",
+        "--score",
+        choices=SCORE_KINDS,
+        default="intelligence",
+        metavar="KIND",
+        help="score to show: int or intelligence, code or coding; "
+        "default: intelligence",
     )
     ap.add_argument(
         "-e",
         "--effort",
         choices=EFFORTS,
         metavar="LEVEL",
-        help=f"effort level of the int score: {', '.join(EFFORTS)}. "
+        help=f"effort level of the score: {', '.join(EFFORTS)}. "
         "default: determined by sel",
     )
     ap.add_argument(
@@ -1280,7 +1418,7 @@ def main(argv=None):
         type=float,
         default=DEFAULT_KEEP,
         metavar="PCT",
-        help="keep PCT%% of the top int score; "
+        help="keep PCT%% of the top score; "
         "influences suggested effort level (sel), default: 95",
     )
     ap.add_argument(
@@ -1342,6 +1480,22 @@ def main(argv=None):
             file=sys.stderr,
         )
         return 2
+    kind = SCORE_KINDS[args.score]
+    # Scores of evaluators are not comparable, so only one is used.
+    evaluator = evaluators[0] if evaluators else None
+    if args.model_evaluator:
+        evaluator = next(
+            (e for e in evaluators if e.get("name") == args.model_evaluator), None
+        )
+        if not evaluator:
+            names = ", ".join(str(e.get("name")) for e in evaluators)
+            print(
+                f"error: no model evaluator {args.model_evaluator!r}, "
+                f"config has: {names or 'none'}",
+                file=sys.stderr,
+            )
+            return 2
+    rater = str(evaluator.get("name") or "evaluator") if evaluator else None
     max_age = 0 if args.update else CACHE_TTL
     logging.basicConfig(
         format="%(message)s",
@@ -1359,8 +1513,8 @@ def main(argv=None):
         for p in providers
     }
     scores, shares, dates = (
-        evaluations(evaluators, args.timeout, max_age, args.keep, args.effort)
-        if evaluators
+        evaluations(evaluator, args.timeout, max_age, args.keep, args.effort, kind)
+        if evaluator
         else ({}, {}, {})
     )
     credit = balances(
@@ -1394,6 +1548,7 @@ def main(argv=None):
         scores,
         shares,
         dates,
+        rater,
         measured,
         base,
         rates,
@@ -1404,9 +1559,9 @@ def main(argv=None):
     if args.limit and not rows:
         warn("no models match --limit")
         return 0
-    rows = sort_rows(rows, args.sort)
+    rows = sort_rows(rows, args.order)
     use_color = not args.no_color and sys.stdout.isatty()
-    trail = (["int", "sel"] if scores else []) + (["rel"] if dates else [])
+    trail = ["score", "sel", "rel"] if scores else []
 
     headers = ["model/provider"] + [name for name, _, _ in results] + trail
     credits = [fmt_balance(credit.get(name)) for name, _, _ in results]
@@ -1414,6 +1569,7 @@ def main(argv=None):
     known = [v for v in known if v is not None]
     total = fmt_balance(sum(known)) if known else ""
     seen = render(rows, headers, credits, use_color, total)
+    picked = any(row[1][1] for row in rows)
     only = any(str(row[1][1]).endswith(ONLY) for row in rows)
     print(
         f"{paint('green', GREEN, use_color)} = lowest, "
@@ -1436,25 +1592,29 @@ def main(argv=None):
                 f"{MEASURED} means the rate is measured from actual traffic, not estimated"
             )
         if GUESSED in seen:
-            print(
-                f"{GUESSED} means no cache price is listed: estimated from aa, else the input price"
-            )
+            how = "the input price is used"
+            if shares:
+                how = f"estimated from {rater}, else the input price"
+            print(f"{GUESSED} means no cache price is listed: {how}")
         if only:
-            print(f"{ONLY} means aa tested only this effort level")
+            print(f"{ONLY} means {rater} tested only this effort level")
         print(f"- prices per 1M tokens in {base} ({shape})")
-        if scores:
+        if picked:
             print(
                 f"- sel is a suggested effort level that gives "
                 f"{args.keep:g}% of the top score"
             )
         if dates:
             print("- rel is the month the model was released")
-        if scores and args.effort:
+        if scores and picked and args.effort:
             print(
-                f"- int is at effort level {args.effort}, or the closest level below it"
+                f"- score is the {kind} score at effort level {args.effort}, "
+                "or the closest level below it"
             )
+        elif scores and picked:
+            print(f"- score is the {kind} score at the sel effort level")
         elif scores:
-            print("- int is at the sel effort level")
+            print(f"- score is the {kind} score of {rater}")
     for currency in sorted(missing):
         warn(f"no {base} rate for {currency}, shown unconverted")
     return 0
