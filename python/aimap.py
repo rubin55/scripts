@@ -67,6 +67,13 @@ puts the highest score first, spelled out as intelligence if you
 prefer. --sort date puts the newest release first. Without it rows
 keep the order of the config.
 
+--limit keeps rows that match field filters such as "int=40+",
+"price=0.10-" or "name=*deepseek*". Separate filters with commas.
+A numeric value with - means that value or less, and + means that
+value or higher. Price uses the cheapest paid cell, or a free cell
+when no paid cell exists. A name filter uses shell wildcards and
+ignores case.
+
 Config format:
 
   [[model_providers]]
@@ -98,14 +105,16 @@ Config format:
 
 Usage:
   aimap.py [-v] [-b 15:1] [-s price] [-e high] [-k 90] [-c USD]
-           [-t 20] [-f FILE] [-n] [-u]
+           [-l "int=40+,price=0.10-"] [-t 20] [-f FILE] [-n] [-u]
 """
 
 import argparse
+import fnmatch
 import glob
 import json
 import logging
 import math
+import operator
 import os
 import shutil
 import sqlite3
@@ -935,6 +944,29 @@ def parse_ratio(text):
     return tuple(w / total for w in weights)
 
 
+def parse_limit(text):
+    """Filters in FIELD=VALUE form, as (field, test, value) rules."""
+    rules = []
+    for item in text.split(","):
+        key, sep, value = item.partition("=")
+        key, value = key.strip().lower(), value.strip()
+        if not sep or not value or key not in ("name", "int", "price"):
+            raise argparse.ArgumentTypeError(
+                "expected FIELD=VALUE with FIELD set to name, int or price"
+            )
+        if key == "name":
+            rules.append((key, fnmatch.fnmatchcase, value.casefold()))
+            continue
+        threshold = number(value[:-1])
+        if value[-1] not in "+-" or threshold is None:
+            raise argparse.ArgumentTypeError(
+                f"bad {key} value {value!r}, expected a number and + or -"
+            )
+        test = operator.ge if value[-1] == "+" else operator.le
+        rules.append((key, test, threshold))
+    return rules
+
+
 def field(text, width, color, use_color):
     """One number padded so its decimal point sits in place."""
     head, frac = split_number(text)
@@ -1042,19 +1074,33 @@ def build_rows(
     return rows
 
 
+def cheapest(row):
+    """Cheapest price in a row, free only when nothing else, or None."""
+    prices = [cell[1][0] for cell in row[3] if cell[0] == "ok"]
+    prices = [p for p in prices if p > 0] or prices
+    return min(prices, default=None)
+
+
+def matches_limits(row, limits):
+    """True when a row matches every limit rule."""
+    values = {"name": row[0].casefold(), "int": row[1][0], "price": cheapest(row)}
+    return all(
+        values[key] is not None and test(values[key], limit)
+        for key, test, limit in limits
+    )
+
+
 def sort_rows(rows, order):
     """Order rows by name, price, score, or release date."""
     if order == "name":
         return sorted(rows, key=lambda row: row[0])
     if order == "price":
 
-        def cheapest(row):
-            prices = [cell[1][0] for cell in row[3] if cell[0] == "ok"]
-            # Free prices count only when there is nothing else.
-            prices = [p for p in prices if p > 0] or prices
-            return min(prices) if prices else float("inf"), row[0]
+        def price(row):
+            value = cheapest(row)
+            return value if value is not None else float("inf"), row[0]
 
-        return sorted(rows, key=cheapest)
+        return sorted(rows, key=price)
     if order in ("int", "intelligence"):
 
         def rated(row):
@@ -1210,6 +1256,17 @@ def main(argv=None):
         help="order rows by name, price, int or date; default: config order",
     )
     ap.add_argument(
+        "-l",
+        "--limit",
+        action="extend",
+        default=[],
+        type=parse_limit,
+        metavar="FIELD=VALUE",
+        help="keep rows that match all name, int or price filters, "
+        "separated by commas; numbers need - for up to or + for at "
+        "least; * is a name wildcard",
+    )
+    ap.add_argument(
         "-e",
         "--effort",
         choices=EFFORTS,
@@ -1330,22 +1387,24 @@ def main(argv=None):
         )
 
     missing = set()
-    rows = sort_rows(
-        build_rows(
-            models,
-            results,
-            catalogs,
-            scores,
-            shares,
-            dates,
-            measured,
-            base,
-            rates,
-            missing,
-            weights,
-        ),
-        args.sort,
+    rows = build_rows(
+        models,
+        results,
+        catalogs,
+        scores,
+        shares,
+        dates,
+        measured,
+        base,
+        rates,
+        missing,
+        weights,
     )
+    rows = [row for row in rows if matches_limits(row, args.limit)]
+    if args.limit and not rows:
+        warn("no models match --limit")
+        return 0
+    rows = sort_rows(rows, args.sort)
     use_color = not args.no_color and sys.stdout.isatty()
     trail = (["int", "sel"] if scores else []) + (["rel"] if dates else [])
 
