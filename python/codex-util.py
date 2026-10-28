@@ -483,7 +483,7 @@ def profiles_list(_):
             [
                 path.name.removesuffix(".config.toml"),
                 data.get("model_provider", "-"),
-                data.get("model", "-").rsplit("/", 1)[-1],
+                data.get("model", "-"),
                 data.get("model_reasoning_effort", "-"),
             ]
         )

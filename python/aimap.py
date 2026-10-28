@@ -81,6 +81,10 @@ provider in each row, using the first number a cell shows. --order
 score puts the highest score first. --order date puts the newest
 release first. Without it rows keep the order of the config.
 
+-v adds a cms (cheapest model slug) column, holding the model id of the cheapest cell in
+each row, as --order price finds it. Where cells tie, it shows the
+first.
+
 --limit keeps rows that match field filters such as "score=40+",
 "price=0.10-" or "name=*deepseek*". Separate filters with commas.
 A numeric value with - means that value or less, and + means that
@@ -487,7 +491,7 @@ def upstream_slugs(entry):
 
 
 def index_models(payload):
-    """Map every slug a provider serves to its prices."""
+    """Map every slug a provider serves to its prices and model ids."""
     items = [e for e in (model_items(payload) or []) if isinstance(e, dict)]
     index = {}
     for entry in items:
@@ -496,39 +500,39 @@ def index_models(payload):
             continue
         price = price_of(entry)
         for slug in slugs(model_id) | upstream_slugs(entry):
-            index.setdefault(slug, []).append(price)
+            index.setdefault(slug, []).append((price, model_id))
     return index
 
 
 def resolve(index, catalog, names):
-    """Cheapest price across the slugs a model is known by.
+    """Cheapest price across the slugs a model is known by, and its id.
 
     A slug the provider serves without a price falls back to the
     curated one for that same slug, so a free endpoint listed next
     to a paid one still counts.
     """
-    state, best, slug = "absent", None, None
+    state, best, slug, model_id = "absent", None, None, None
     for name in names:
         hits = index.get(name)
         if hits is None:
             continue
         state = "unknown"
-        for price in hits:
+        for price, served in hits:
             if price is None:
                 price = catalog_price(catalog, {name})
             if price is None:
                 continue
             if best is None or price[:2] < best[:2]:
-                best, slug = price, name
+                best, slug, model_id = price, name, served
     if best is None:
-        return state, None
+        return state, None, None
     # The pair can come from the provider while only models.dev
     # states what a cache hit costs.
     if best[2] is None:
         listed = catalog_price(catalog, {slug})
         if listed and listed[2] is not None and listed[3] == best[3]:
             best = (best[0], best[1], listed[2], best[3])
-    return "ok", best
+    return "ok", best, model_id
 
 
 def index_catalog(catalog, provider_id):
@@ -1119,8 +1123,8 @@ def collect(providers, timeout, max_age):
 def listed_pairs(index):
     """Slug to its cheapest listed (input, output)."""
     pairs = {}
-    for slug, prices in index.items():
-        priced = [p for p in prices if p]
+    for slug, hits in index.items():
+        priced = [p for p, _ in hits if p]
         if priced:
             best = min(priced, key=lambda p: (p[0], p[1]))
             pairs[slug] = (best[0], best[1])
@@ -1129,8 +1133,8 @@ def listed_pairs(index):
 
 def listed_currency(index):
     """The currency a provider lists its prices in, or USD."""
-    for prices in index.values():
-        for price in prices:
+    for hits in index.values():
+        for price, _ in hits:
             if price:
                 return price[3]
     return "USD"
@@ -1170,11 +1174,11 @@ def build_rows(
         cells = []
         for provider, index, err in results:
             if err:
-                cells.append(("err", None, ""))
+                cells.append(("err", None, "", None))
                 continue
-            state, price = resolve(index, catalogs.get(provider, {}), names)
+            state, price, model_id = resolve(index, catalogs.get(provider, {}), names)
             if price is None:
-                cells.append((state, None, ""))
+                cells.append((state, None, "", None))
                 continue
             # An energy billed account pays its own measured rate,
             # not the one the provider lists.
@@ -1191,7 +1195,7 @@ def build_rows(
                 blended, guessed = blend(value, weights)
                 value = (blended,)
                 mark += GUESSED if guessed else ""
-            cells.append(("ok", value, mark))
+            cells.append(("ok", value, mark, model_id))
         rows.append((name, rated, release, cells))
     return rows
 
@@ -1201,6 +1205,13 @@ def cheapest(row):
     prices = [cell[1][0] for cell in row[3] if cell[0] == "ok"]
     prices = [p for p in prices if p > 0] or prices
     return min(prices, default=None)
+
+
+def cheapest_slug(row):
+    """Model id of the first cell that holds the cheapest price."""
+    low = cheapest(row)
+    ok = [cell for cell in row[3] if cell[0] == "ok"]
+    return next((cell[3] for cell in ok if cell[1][0] == low), None)
 
 
 def matches_limits(row, limits):
@@ -1243,6 +1254,11 @@ def fmt_balance(value):
     return f"({value:.2f})" if value is not None else "(n/a)"
 
 
+def justify(text, width, key):
+    """A fact padded to width: text left aligned, numbers right."""
+    return text.ljust(width) if key.strip() == "cms" else text.rjust(width)
+
+
 def render(rows, headers, credits, use_color, total=""):
     """Print the table and return the marks it used."""
     labels = {"absent": "-", "unknown": "n/a", "err": "err"}
@@ -1252,7 +1268,7 @@ def render(rows, headers, credits, use_color, total=""):
             [None if v is None else fmt(v) for v in price]
             if state == "ok"
             else labels[state]
-            for state, price, _ in cells
+            for state, price, *_ in cells
         ]
         for _, _, _, cells in rows
     ]
@@ -1261,9 +1277,11 @@ def render(rows, headers, credits, use_color, total=""):
     n = 1 + len(credits)
     trail = headers[n:]
     facts = []
-    for _, (score, sel), release, _ in rows:
+    for row in rows:
+        (score, sel), release = row[1], row[2]
         rel = release.strftime("%b'%y").lower() if release else None
         values = {"score": score, "sel": sel, "rel": rel}
+        values["cms"] = cheapest_slug(row)
         facts.append(
             [
                 "-" if v is None else v if isinstance(v, str) else f"{v:.1f}"
@@ -1301,9 +1319,9 @@ def render(rows, headers, credits, use_color, total=""):
     for i in range(len(trail)):
         widths.append(max([MIN_WIDTH] + [len(s[i]) for s in facts]))
 
-    # Fact headers sit right, over their values.
+    # Fact headers sit right, over their values, except cms.
     line = [h[:w].ljust(w) for h, w in zip(headers[:n], widths)]
-    line += [h.rjust(w) for h, w in zip(trail, widths[n:])]
+    line += [justify(h, w, h) for h, w in zip(trail, widths[n:])]
     print("  ".join(line).rstrip())
     if any(credits) or total:
         line = [total.ljust(widths[0])]
@@ -1327,7 +1345,7 @@ def render(rows, headers, credits, use_color, total=""):
                 high = values[-1] if values[-1] > values[-2] else None
             extremes.append((low, high))
         out = [row[0].ljust(widths[0])]
-        for cell, (*_, mark), (size, mark_width, span, indent), width in zip(
+        for cell, (_, _, mark, _), (size, mark_width, span, indent), width in zip(
             cells, row[3], layout, widths[1:]
         ):
             if isinstance(cell, str):
@@ -1348,8 +1366,8 @@ def render(rows, headers, credits, use_color, total=""):
             seen.update(mark)
             pad = " " * (mark_width - len(mark) + width - span)
             out.append(" ".join(fields) + paint(mark, DIM, use_color) + pad)
-        for text, width in zip(texts, widths[n:]):
-            cell = text.rjust(width)
+        for text, width, key in zip(texts, widths[n:], trail):
+            cell = justify(text, width, key)
             out.append(paint(cell, DIM, use_color) if text.strip() == "-" else cell)
         print("  ".join(out).rstrip())
     return seen
@@ -1425,7 +1443,7 @@ def main(argv=None):
         "-v",
         "--verbose",
         action="store_true",
-        help="show the legend and explanations",
+        help="show the legend, explanations and cheapest slug",
     )
     ap.add_argument(
         "-t",
@@ -1562,6 +1580,7 @@ def main(argv=None):
     rows = sort_rows(rows, args.order)
     use_color = not args.no_color and sys.stdout.isatty()
     trail = ["score", "sel", "rel"] if scores else []
+    trail += ["cms"] if args.verbose else []
 
     headers = ["model/provider"] + [name for name, _, _ in results] + trail
     credits = [fmt_balance(credit.get(name)) for name, _, _ in results]
@@ -1615,6 +1634,7 @@ def main(argv=None):
             print(f"- score is the {kind} score at the sel effort level")
         elif scores:
             print(f"- score is the {kind} score of {rater}")
+        print("- cms is the model id of the cheapest price, the first on a tie")
     for currency in sorted(missing):
         warn(f"no {base} rate for {currency}, shown unconverted")
     return 0
