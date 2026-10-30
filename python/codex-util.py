@@ -848,7 +848,7 @@ def expand_trusted_dirs(layers):
                 and not child.is_symlink()
                 and not child.name.startswith(".")
             )
-        entries.extend((directory, "trusted") for directory in current)
+        entries.extend((directory, "untrusted") for directory in current)
     return entries
 
 
@@ -859,7 +859,7 @@ def trust_list(_):
 
 
 def trust_generate(args):
-    # Trust the roots, and give each project config the MCP states of
+    # Mark roots as untrusted, and give each project the MCP states of
     # config.toml, changed by -e and -d, then by the MCP pins.
     layers = trusted_dirs_layers()
     entries = deduplicate(expand_trusted_dirs(layers))
@@ -1083,7 +1083,7 @@ def main(argv=None):
     ).set_defaults(func=trust_list)
     cmd = trust.add_parser(
         "generate",
-        help="generate trust roots from ~/.trusted-dirs.toml, and the MCP "
+        help="generate untrusted roots from ~/.trusted-dirs.toml, and the MCP "
         "states in their project configs",
     )
     cmd.add_argument(
