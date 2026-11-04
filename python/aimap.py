@@ -85,6 +85,11 @@ release first. Without it rows keep the order of the config.
 each row, as --order price finds it. Where cells tie, it shows the
 first.
 
+-w opens the site of the evaluator in a web browser. For
+artificial-analysis it is the page that compares the models the
+table would show, --limit included. BenchLM compares two models at a
+time, so for benchlm it is the leaderboard.
+
 --limit keeps rows that match field filters such as "score=40+",
 "price=0.10-" or "name=*deepseek*". Separate filters with commas.
 A numeric value with - means that value or less, and + means that
@@ -132,7 +137,7 @@ Config format:
 Usage:
   aimap.py [-v] [-b 15:1] [-o price] [-s coding] [-e high] [-k 90]
            [-m benchlm] [-c USD] [-l "score=40+,price=0.10-"] [-t 20]
-           [-f FILE] [-n] [-u]
+           [-f FILE] [-n] [-u] [-w]
 """
 
 import argparse
@@ -153,6 +158,7 @@ import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
+import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
@@ -375,11 +381,13 @@ EVALUATORS = {
         # Its coding index is obsolete, so use its engineering index.
         "indexes": {"intelligence": "intelligence", "coding": "engineering"},
         "efforts": True,
+        "web": "https://artificialanalysis.ai/?models={}",
     },
     "benchlm": {
         "fetch": fetch_benchlm,
         "indexes": {"intelligence": "intelligence", "coding": "coding"},
         "efforts": False,
+        "web": "https://benchlm.ai/",
     },
 }
 
@@ -951,7 +959,7 @@ def evaluations(evaluator, timeout, max_age, keep, effort, kind):
     spec = EVALUATORS.get(api)
     if not spec:
         warn(f"{name}: unknown type {api}")
-        return {}, {}, {}
+        return {}, {}, {}, {}
     if effort and not spec["efforts"]:
         warn(f"{name}: rates no effort levels, ignoring --effort")
         effort = None
@@ -966,8 +974,8 @@ def evaluations(evaluator, timeout, max_age, keep, effort, kind):
     )
     if not payload:
         warn(f"{name}: {err}")
-        return {}, {}, {}
-    index, families, shares, dates = {}, {}, {}, {}
+        return {}, {}, {}, {}
+    index, families, shares, dates, ids = {}, {}, {}, {}, {}
     for entry in payload["data"]:
         if not isinstance(entry, dict):
             continue
@@ -977,6 +985,7 @@ def evaluations(evaluator, timeout, max_age, keep, effort, kind):
             continue
         score = score_of(scores, spec["indexes"][kind])
         index.setdefault(squash(slug), (score, None))
+        ids.setdefault(squash(slug), slug)
         released = release_of(entry.get("release_date"))
         if released:
             dates.setdefault(squash(slug), released)
@@ -998,7 +1007,26 @@ def evaluations(evaluator, timeout, max_age, keep, effort, kind):
         elif effort and effort != EFFORTS[-1]:
             # No named levels, so the score at a lower effort is unknown.
             index[slug] = (None, None)
-    return index, shares, dates
+    return index, shares, dates, ids
+
+
+def rated_name(model, rater):
+    """Squashed name an evaluator knows a model by."""
+    name = str(model.get("name", ""))
+    rated_as = model.get("scores") or name
+    # A scores table names the model per evaluator.
+    if isinstance(rated_as, dict):
+        rated_as = rated_as.get(rater) or name
+    return squash(str(rated_as))
+
+
+def web_url(evaluator, models, ids, rater):
+    """Evaluator page for these models, or None for an unknown type."""
+    spec = EVALUATORS.get(str(evaluator.get("type") or "artificial-analysis"))
+    if not spec:
+        return None
+    found = [ids[s] for m in models if (s := rated_name(m, rater)) in ids]
+    return spec["web"].format(urllib.parse.quote(",".join(found)))
 
 
 def fx_rates(base, timeout, max_age):
@@ -1163,11 +1191,7 @@ def build_rows(
         ordered = [name.lower()]
         ordered += [str(a).lower() for a in model.get("aliases", [])]
         names = set(ordered) | {squash(n) for n in ordered}
-        rated_as = model.get("scores") or name
-        # A scores table names the model per evaluator.
-        if isinstance(rated_as, dict):
-            rated_as = rated_as.get(rater) or name
-        rated_as = squash(str(rated_as))
+        rated_as = rated_name(model, rater)
         rated = scores.get(rated_as, (None, None))
         share = shares.get(rated_as)
         release = dates.get(rated_as)
@@ -1461,6 +1485,12 @@ def main(argv=None):
     ap.add_argument(
         "-u", "--update", action="store_true", help=f"ignore the cache in {CACHE}"
     )
+    ap.add_argument(
+        "-w",
+        "--web",
+        action="store_true",
+        help="open the evaluator site for the models",
+    )
     args = ap.parse_args(argv)
 
     try:
@@ -1530,10 +1560,10 @@ def main(argv=None):
         )
         for p in providers
     }
-    scores, shares, dates = (
+    scores, shares, dates, ids = (
         evaluations(evaluator, args.timeout, max_age, args.keep, args.effort, kind)
         if evaluator
-        else ({}, {}, {})
+        else ({}, {}, {}, {})
     )
     credit = balances(
         providers, args.timeout, 0 if args.update else BALANCE_TTL, base, rates
@@ -1578,6 +1608,15 @@ def main(argv=None):
         warn("no models match --limit")
         return 0
     rows = sort_rows(rows, args.order)
+    if args.web:
+        by_name = {str(m.get("name", "")): m for m in models}
+        shown = [by_name[row[0]] for row in rows]
+        url = evaluator and web_url(evaluator, shown, ids, rater)
+        if not url:
+            warn(f"{rater or 'no evaluator'}: no web page to open")
+        elif not webbrowser.open(url):
+            print(url)
+        return 0
     use_color = not args.no_color and sys.stdout.isatty()
     trail = ["score", "sel", "rel"] if scores else []
     trail += ["cms"] if args.verbose else []
