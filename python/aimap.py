@@ -43,23 +43,20 @@ scores table sets that name per evaluator, so the others use the
 name. Aliases only match provider names, or the upstream model a
 provider names in metadata.huggingface_id, as Neuralwatt does for
 aliases like nw-flash. Flex tiers are left out of that, as they
-serve the same model at a discount. Where it rates
-the model at more than one effort level, a sel column shows the
-lowest level that keeps a share of the best score, 95 percent unless
---keep sets another, and score shows the score at that level. --effort
-shows score at a set effort level instead, or the closest level below
-it that the evaluator rates. A model the evaluator rates at no named
-level keeps its one score, unless --effort sets a level below max,
-as its score at a lower level is unknown.
-The rel column shows the month the model was released.
+serve the same model at a discount. The effort column shows the effort
+level of the score, or a dash if the evaluator names no level.
+By default, score holds the evaluator's default score. An effort filter
+selects a score within its limits. "effort=none" selects entries marked
+none or non-reasoning.
+The date column shows the month the model was released.
 
 Scores of two evaluators are not comparable, so aimap uses one: the
 first in the config, or the one --model-evaluator names. An evaluator
 has a type: artificial-analysis, the default, or benchlm. BenchLM has
 no prices. It finds a model by slug or display name, as a slug can
 lack a date. Its release dates are in a catalog that costs 10 more
-reads, so rel shows dashes. It rates no effort levels, so sel shows
-dashes and --effort has no effect. Its free plan has 250 reads a
+reads, so date shows dashes. It rates no effort levels, so effort shows
+dashes and matches "effort=unknown". Its free plan has 250 reads a
 month. One fetch takes 5 reads, 3 for the intelligence ranking and 2
 for the coding ranking. The cache keeps it for 24 hours, also when a
 ranking failed to come in, as each read counts.
@@ -96,6 +93,12 @@ A numeric value with - means that value or less, and + means that
 value or higher. Price uses the cheapest paid cell, or a free cell
 when no paid cell exists. A name filter uses shell wildcards and
 ignores case.
+Effort filters use the order none, low, medium, high, xhigh, max.
+For example, "effort=high-" keeps high and lower effort levels, and
+"effort=high+" keeps high and higher levels. These range filters also
+keep unknown effort. "effort=high" keeps only high, and "effort=unknown"
+keeps only unknown effort. Effort filters select the highest available
+effort within the limits for each model.
 
 Config format:
 
@@ -135,7 +138,7 @@ Config format:
   scores = { artificial-analysis = "..." }
 
 Usage:
-  aimap.py [-v] [-b 15:1] [-o price] [-s coding] [-e high] [-k 90]
+  aimap.py [-v] [-b 15:1] [-o price] [-s coding]
            [-m benchlm] [-c USD] [-l "score=40+,price=0.10-"] [-t 20]
            [-f FILE] [-n] [-u] [-w]
 """
@@ -160,7 +163,8 @@ import urllib.parse
 import urllib.request
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from typing import NamedTuple
 
 CONFIG = os.path.expanduser("~/.aimap.toml")
 CACHE = os.path.expanduser("~/.cache/aimap")
@@ -187,8 +191,7 @@ BALANCE_KEYS = [
 # is the ratio Artificial Analysis states for its blended figure.
 DEFAULT_RATIO = "7:2:1"
 # Effort levels an evaluator rates a model at, lowest first.
-EFFORTS = ["low", "medium", "high", "xhigh", "max"]
-DEFAULT_KEEP = 95.0
+EFFORTS = ["none", "low", "medium", "high", "xhigh", "max"]
 # Names that pick a score, and the kind of score each one stands for.
 SCORE_KINDS = {
     "int": "intelligence",
@@ -212,7 +215,6 @@ BLUE = "\033[34m"
 DIM = "\033[2m"
 GUESSED = "~"
 MEASURED = "*"
-ONLY = "+"
 MIN_WIDTH = 5
 log = logging.getLogger(__name__)
 
@@ -252,6 +254,31 @@ CACHE_KEYS = [
     ("cache_read_input_token_cost", 1e6),
     ("input_cache_read", 1e6),
 ]
+
+
+class Price(NamedTuple):
+    """Provider prices per million tokens in the stated currency."""
+
+    input: float
+    output: float
+    cache: float | None
+    currency: str
+
+
+class Cell(NamedTuple):
+    """A provider's prices after conversion and optional blending."""
+
+    state: str
+    values: tuple[float | None, ...] = ()
+    mark: str = ""
+    model_id: str | None = None
+
+
+class Row(NamedTuple):
+    name: str
+    rating: tuple[float | None, str | None]
+    release: date | None
+    cells: list[Cell]
 
 
 def warn(msg):
@@ -453,7 +480,7 @@ def price_of(entry):
             if low is None or high is None or low < 0 or high < 0:
                 continue
             currency = str(src.get("currency") or "USD").upper()
-            return low * factor, high * factor, cache_of(src), currency
+            return Price(low * factor, high * factor, cache_of(src), currency)
     return None
 
 
@@ -512,14 +539,14 @@ def index_models(payload):
     return index
 
 
-def resolve(index, catalog, names):
+def resolve(index, catalog, names, key=lambda p: p[:2]):
     """Cheapest price across the slugs a model is known by, and its id.
 
     A slug the provider serves without a price falls back to the
     curated one for that same slug, so a free endpoint listed next
     to a paid one still counts.
     """
-    state, best, slug, model_id = "absent", None, None, None
+    state, best, model_id = "absent", None, None
     for name in names:
         hits = index.get(name)
         if hits is None:
@@ -527,19 +554,22 @@ def resolve(index, catalog, names):
         state = "unknown"
         for price, served in hits:
             if price is None:
-                price = catalog_price(catalog, {name})
+                price = catalog_price(catalog, name, key)
             if price is None:
                 continue
-            if best is None or price[:2] < best[:2]:
-                best, slug, model_id = price, name, served
+            # Complete cache prices before comparing endpoints.
+            if price.cache is None:
+                listed = catalog_price(catalog, name, key)
+                if (
+                    listed
+                    and listed.cache is not None
+                    and listed.currency == price.currency
+                ):
+                    price = price._replace(cache=listed.cache)
+            if best is None or key(price) < key(best):
+                best, model_id = price, served
     if best is None:
         return state, None, None
-    # The pair can come from the provider while only models.dev
-    # states what a cache hit costs.
-    if best[2] is None:
-        listed = catalog_price(catalog, {slug})
-        if listed and listed[2] is not None and listed[3] == best[3]:
-            best = (best[0], best[1], listed[2], best[3])
     return "ok", best, model_id
 
 
@@ -559,14 +589,13 @@ def index_catalog(catalog, provider_id):
             continue
         cache = number(cost.get("cache_read"))
         for slug in slugs(str(model_id)):
-            index.setdefault(slug, []).append((low, high, cache, "USD"))
+            index.setdefault(slug, []).append(Price(low, high, cache, "USD"))
     return index
 
 
-def catalog_price(index, names):
+def catalog_price(index, name, key=lambda p: p[:2]):
     """Cheapest curated price for a model, or None if not listed."""
-    hits = [p for name in names for p in index.get(name, [])]
-    return min(hits, key=lambda p: (p[0], p[1])) if hits else None
+    return min(index.get(name, []), key=key, default=None)
 
 
 def cache_file(name):
@@ -684,11 +713,7 @@ def firefox_cookie(spec):
 
 
 def cookie_balance(provider, timeout):
-    """Get balance from with help from cookie in Firefox.
-
-    For a site that shows credit only to a logged-in browser. Reads
-    the cookie from Firefox. If no valid cookie, returns nothing.
-    """
+    """Read a balance with a session cookie from Firefox."""
     name = str(provider.get("name", "?"))
     spec = str(provider.get("balance_cookie") or "")
     cookie = firefox_cookie(spec)
@@ -707,7 +732,7 @@ def cookie_balance(provider, timeout):
 
 
 def get_balance(provider, timeout, max_age):
-    """What is left to spend at a provider, or None if it says."""
+    """Provider balance and currency, with None for an unknown balance."""
     name = str(provider.get("name", "?"))
     cached = cache_read(f"balance-{name}", max_age)
     if isinstance(cached, dict) and "balance" in cached:
@@ -815,13 +840,17 @@ def update_usage(provider, cached, timeout):
     )
     start = now - span
     if newest:
-        start = max(start, datetime.fromisoformat(newest) - timedelta(minutes=5))
-    log.info(f"{name}: fetching usage since {start:%Y-%m-%d %H:%M}")
-    fresh, method, err = fetch_window(base_url, path, token, start, now, timeout)
-    if err:
-        warn(f"{name}: usage api: {err}")
-    accounting = method or accounting
-    merge(fresh)
+        start = datetime.fromisoformat(newest) - timedelta(minutes=5)
+    while start < now:
+        end = min(start + span, now)
+        log.info(f"{name}: fetching usage since {start:%Y-%m-%d %H:%M}")
+        fresh, method, err = fetch_window(base_url, path, token, start, end, timeout)
+        if err:
+            warn(f"{name}: usage api: {err}")
+            break
+        accounting = method or accounting
+        merge(fresh)
+        start = end
 
     # Backwards until the history runs out, picking up where a past
     # run stopped.
@@ -909,7 +938,7 @@ def measure(provider, listed, currency, timeout, update):
         # The whole spend lands on fresh input and output, so a cache
         # hit carries nothing on top.
         for slug in slugs(model):
-            index[slug] = (low * scale, high * scale, 0.0, currency)
+            index[slug] = Price(low * scale, high * scale, 0.0, currency)
     return index
 
 
@@ -933,26 +962,19 @@ def effort_of(name):
     """Effort level in the brackets of a name, such as (xhigh)."""
     head, _, tail = name.rpartition("(")
     words = tail.lower().replace(",", " ").replace(")", " ").split()
-    if not head or "non-reasoning" in words:
+    if not head:
         return None
+    if "non-reasoning" in words:
+        return "none"
     return next((w for w in words if w in EFFORTS), None)
 
 
-def suggest(levels, keep):
-    """Lowest effort level that keeps keep percent of the best score."""
-    if len(levels) == 1:
-        return next(iter(levels)) + ONLY
-    floor = max(levels.values()) * keep / 100
-    return next(e for e in EFFORTS if e in levels and levels[e] >= floor)
+def effort_rank(level):
+    """Position in the effort order, or None for an unknown level."""
+    return EFFORTS.index(level) if level in EFFORTS else None
 
 
-def at_effort(levels, effort):
-    """Score at this effort level, or the closest level below it."""
-    rated = [e for e in EFFORTS[: EFFORTS.index(effort) + 1] if e in levels]
-    return levels[rated[-1]] if rated else None
-
-
-def evaluations(evaluator, timeout, max_age, keep, effort, kind):
+def evaluations(evaluator, timeout, max_age, kind, limits=()):
     """Scores, cache-price shares and release dates from an evaluator."""
     name = str(evaluator.get("name") or "evaluator")
     api = str(evaluator.get("type") or "artificial-analysis")
@@ -960,9 +982,6 @@ def evaluations(evaluator, timeout, max_age, keep, effort, kind):
     if not spec:
         warn(f"{name}: unknown type {api}")
         return {}, {}, {}, {}
-    if effort and not spec["efforts"]:
-        warn(f"{name}: rates no effort levels, ignoring --effort")
-        effort = None
     payload, err = cached_json(
         name,
         evaluator.get("base_url"),
@@ -984,29 +1003,37 @@ def evaluations(evaluator, timeout, max_age, keep, effort, kind):
         if not isinstance(slug, str) or not isinstance(scores, dict):
             continue
         score = score_of(scores, spec["indexes"][kind])
-        index.setdefault(squash(slug), (score, None))
-        ids.setdefault(squash(slug), slug)
+        level = effort_of(str(entry.get("name") or "")) if spec["efforts"] else None
+        key = squash(slug)
+        index.setdefault(key, (score, level if score is not None else None))
+        ids.setdefault(key, slug)
         released = release_of(entry.get("release_date"))
         if released:
-            dates.setdefault(squash(slug), released)
+            dates.setdefault(key, released)
         # A zero cache price next to a paid input is a placeholder.
         price = price_of(entry)
-        if price and price[0] > 0 and price[2]:
-            shares.setdefault(squash(slug), price[2] / price[0])
+        if price and price.input > 0 and price.cache:
+            shares.setdefault(key, price.cache / price.input)
         # Variants are named base-level, the top level just base.
-        level = spec["efforts"] and effort_of(str(entry.get("name") or ""))
         if level and score is not None:
-            base = squash(slug.lower().removesuffix(f"-{level}"))
-            levels = families.setdefault(base, {})
-            levels.setdefault(level, score)
-    for slug in index:
-        if slug in families:
-            levels = families[slug]
-            sel = suggest(levels, keep)
-            index[slug] = at_effort(levels, effort or sel.removesuffix(ONLY)), sel
-        elif effort and effort != EFFORTS[-1]:
-            # No named levels, so the score at a lower effort is unknown.
-            index[slug] = (None, None)
+            base = slug.lower().removesuffix(f"-{level}")
+            if level == "none":
+                base = base.removesuffix("-non-reasoning")
+            levels = families.setdefault(squash(base), {})
+            levels.setdefault(level, (score, slug))
+    if any(key == "effort" for key, _, _ in limits):
+        allowed = [
+            level
+            for rank, level in reversed(list(enumerate(EFFORTS)))
+            if all(test(rank, limit) for key, test, limit in limits if key == "effort")
+        ]
+        for slug in index:
+            levels = families.get(slug, {})
+            for level in allowed:
+                if level in levels:
+                    score, ids[slug] = levels[level]
+                    index[slug] = score, level
+                    break
     return index, shares, dates, ids
 
 
@@ -1087,9 +1114,9 @@ def parse_ratio(text):
     weights = [w for f in fields if (w := number(f)) is not None]
     if len(weights) != len(fields) or len(weights) not in (2, 3):
         return None
-    if min(weights) < 0 or sum(weights) <= 0:
-        return None
     total = sum(weights)
+    if min(weights) < 0 or not 0 < total < math.inf:
+        return None
     return tuple(w / total for w in weights)
 
 
@@ -1099,17 +1126,29 @@ def parse_limit(text):
     for item in text.split(","):
         key, sep, value = item.partition("=")
         key, value = key.strip().lower(), value.strip()
-        if not sep or not value or key not in ("name", "score", "price"):
+        if not sep or not value or key not in ("name", "score", "price", "effort"):
             raise argparse.ArgumentTypeError(
-                "expected FIELD=VALUE with FIELD set to name, score or price"
+                "expected FIELD=VALUE with FIELD set to name, score, price or effort"
             )
         if key == "name":
             rules.append((key, fnmatch.fnmatchcase, value.casefold()))
             continue
-        threshold = number(value[:-1])
+        if key == "effort":
+            exact = effort_rank(value.lower())
+            if exact is not None or value.lower() == "unknown":
+                rules.append((key, operator.eq, exact))
+                continue
+            threshold = effort_rank(value[:-1].lower())
+            expected = (
+                f"an effort level ({', '.join(EFFORTS)}) with optional + or -, "
+                "or unknown"
+            )
+        else:
+            threshold = number(value[:-1])
+            expected = "a number and + or -"
         if value[-1] not in "+-" or threshold is None:
             raise argparse.ArgumentTypeError(
-                f"bad {key} value {value!r}, expected a number and + or -"
+                f"bad {key} value {value!r}, expected {expected}"
             )
         test = operator.ge if value[-1] == "+" else operator.le
         rules.append((key, test, threshold))
@@ -1154,8 +1193,8 @@ def listed_pairs(index):
     for slug, hits in index.items():
         priced = [p for p, _ in hits if p]
         if priced:
-            best = min(priced, key=lambda p: (p[0], p[1]))
-            pairs[slug] = (best[0], best[1])
+            best = min(priced, key=lambda p: (p.input, p.output))
+            pairs[slug] = (best.input, best.output)
     return pairs
 
 
@@ -1164,7 +1203,7 @@ def listed_currency(index):
     for hits in index.values():
         for price, _ in hits:
             if price:
-                return price[3]
+                return price.currency
     return "USD"
 
 
@@ -1195,14 +1234,23 @@ def build_rows(
         rated = scores.get(rated_as, (None, None))
         share = shares.get(rated_as)
         release = dates.get(rated_as)
+
+        def price_key(price, share=share):
+            if price.cache is None and share is not None:
+                price = price._replace(cache=price.input * share)
+            value = convert(price, base, rates, missing)
+            return (blend(value, weights)[0],) if weights else value[:2]
+
         cells = []
         for provider, index, err in results:
             if err:
-                cells.append(("err", None, "", None))
+                cells.append(Cell("err"))
                 continue
-            state, price, model_id = resolve(index, catalogs.get(provider, {}), names)
+            state, price, model_id = resolve(
+                index, catalogs.get(provider, {}), names, price_key
+            )
             if price is None:
-                cells.append((state, None, "", None))
+                cells.append(Cell(state))
                 continue
             # An energy billed account pays its own measured rate,
             # not the one the provider lists.
@@ -1210,39 +1258,52 @@ def build_rows(
             hits = [rated_by_use[c] for c in names if c in rated_by_use]
             mark = ""
             if hits:
-                price, mark = min(hits, key=lambda p: (p[0], p[1])), MEASURED
-            if price[2] is None and share is not None:
-                price = (price[0], price[1], price[0] * share, price[3])
+                price = min(hits, key=price_key)
+                mark = MEASURED
+            if price.cache is None and share is not None:
+                price = price._replace(cache=price.input * share)
                 mark += GUESSED
             value = convert(price, base, rates, missing)
             if weights:
                 blended, guessed = blend(value, weights)
                 value = (blended,)
                 mark += GUESSED if guessed else ""
-            cells.append(("ok", value, mark, model_id))
-        rows.append((name, rated, release, cells))
+            cells.append(Cell("ok", value, mark, model_id))
+        rows.append(Row(name, rated, release, cells))
     return rows
+
+
+def cheapest_cell(row):
+    """First cheapest paid cell, or a free cell if no paid cell exists."""
+    cells = [cell for cell in row.cells if cell.state == "ok"]
+    paid = [cell for cell in cells if cell.values[0] > 0]
+    return min(paid or cells, key=lambda cell: cell.values[0], default=None)
 
 
 def cheapest(row):
     """Cheapest price in a row, free only when nothing else, or None."""
-    prices = [cell[1][0] for cell in row[3] if cell[0] == "ok"]
-    prices = [p for p in prices if p > 0] or prices
-    return min(prices, default=None)
+    cell = cheapest_cell(row)
+    return cell.values[0] if cell else None
 
 
 def cheapest_slug(row):
     """Model id of the first cell that holds the cheapest price."""
-    low = cheapest(row)
-    ok = [cell for cell in row[3] if cell[0] == "ok"]
-    return next((cell[3] for cell in ok if cell[1][0] == low), None)
+    cell = cheapest_cell(row)
+    return cell.model_id if cell else None
 
 
 def matches_limits(row, limits):
     """True when a row matches every limit rule."""
-    values = {"name": row[0].casefold(), "score": row[1][0], "price": cheapest(row)}
+    values = {
+        "name": row.name.casefold(),
+        "score": row.rating[0],
+        "price": cheapest(row),
+        "effort": effort_rank(row.rating[1]),
+    }
     return all(
-        values[key] is not None and test(values[key], limit)
+        test(values[key], limit)
+        if values[key] is not None or test is operator.eq
+        else key == "effort"
         for key, test, limit in limits
     )
 
@@ -1250,25 +1311,25 @@ def matches_limits(row, limits):
 def sort_rows(rows, order):
     """Order rows by name, price, score, or release date."""
     if order == "name":
-        return sorted(rows, key=lambda row: row[0])
+        return sorted(rows, key=lambda row: row.name)
     if order == "price":
 
         def price(row):
             value = cheapest(row)
-            return value if value is not None else float("inf"), row[0]
+            return value if value is not None else math.inf, row.name
 
         return sorted(rows, key=price)
     if order == "score":
 
         def rated(row):
-            score = row[1][0]
-            return -score if score is not None else float("inf"), row[0]
+            score = row.rating[0]
+            return -score if score is not None else math.inf, row.name
 
         return sorted(rows, key=rated)
     if order == "date":
 
         def released(row):
-            return -row[2].toordinal() if row[2] else float("inf"), row[0]
+            return -row.release.toordinal() if row.release else math.inf, row.name
 
         return sorted(rows, key=released)
     return rows
@@ -1289,12 +1350,12 @@ def render(rows, headers, credits, use_color, total=""):
     # A cell is a label, or the printed text of each of its prices.
     grid = [
         [
-            [None if v is None else fmt(v) for v in price]
-            if state == "ok"
-            else labels[state]
-            for state, price, *_ in cells
+            [None if v is None else fmt(v) for v in cell.values]
+            if cell.state == "ok"
+            else labels[cell.state]
+            for cell in row.cells
         ]
-        for _, _, _, cells in rows
+        for row in rows
     ]
     # Fact columns trail the providers. They are one fact per model,
     # so they take no part in the ranking.
@@ -1302,9 +1363,9 @@ def render(rows, headers, credits, use_color, total=""):
     trail = headers[n:]
     facts = []
     for row in rows:
-        (score, sel), release = row[1], row[2]
-        rel = release.strftime("%b'%y").lower() if release else None
-        values = {"score": score, "sel": sel, "rel": rel}
+        score, effort = row.rating
+        released = row.release.strftime("%b'%y").lower() if row.release else None
+        values = {"score": score, "effort": effort, "date": released}
         values["cms"] = cheapest_slug(row)
         facts.append(
             [
@@ -1312,18 +1373,11 @@ def render(rows, headers, credits, use_color, total=""):
                 for v in map(values.get, trail)
             ]
         )
-    # Leave room for a mark, so the words align on their last letter.
-    for i in range(len(trail)):
-        if any(s[i].endswith(ONLY) for s in facts):
-            trail[i] += " "
-            for s in facts:
-                s[i] += "" if s[i].endswith(ONLY) else " "
-
     # Per column, how wide each number is on either side of its
     # decimal point, plus room for the marks. A number nothing in
     # the column states, such as a cache price, takes no space.
     layout = []
-    widths = [max([len(headers[0])] + [len(row[0]) for row in rows])]
+    widths = [max([len(headers[0])] + [len(row.name) for row in rows])]
     for i, credit in enumerate(credits):
         column = [cells[i] for cells in grid]
         numbers = [c for c in column if isinstance(c, list)]
@@ -1332,7 +1386,7 @@ def render(rows, headers, credits, use_color, total=""):
             parts = [split_number(n[j]) for n in numbers if n[j]]
             if parts:
                 size.append([max(len(p[k]) for p in parts) for k in (0, 1)])
-        mark_width = max((len(row[3][i][2]) for row in rows), default=0)
+        mark_width = max((len(row.cells[i].mark) for row in rows), default=0)
         span = sum(map(sum, size)) + len(size) - 1 + mark_width if size else 0
         # A label starts under the last digit before the first point.
         indent = size[0][0] - 1 if size else 0
@@ -1341,7 +1395,7 @@ def render(rows, headers, credits, use_color, total=""):
         # Columns fit their contents, so a long header is clipped.
         widths.append(max(MIN_WIDTH, span, indent + label, len(credit)))
     for i in range(len(trail)):
-        widths.append(max([MIN_WIDTH] + [len(s[i]) for s in facts]))
+        widths.append(max([MIN_WIDTH, len(trail[i])] + [len(s[i]) for s in facts]))
 
     # Fact headers sit right, over their values, except cms.
     line = [h[:w].ljust(w) for h, w in zip(headers[:n], widths)]
@@ -1368,9 +1422,9 @@ def render(rows, headers, credits, use_color, total=""):
                 low = values[0] if values[0] < values[1] else None
                 high = values[-1] if values[-1] > values[-2] else None
             extremes.append((low, high))
-        out = [row[0].ljust(widths[0])]
-        for cell, (_, _, mark, _), (size, mark_width, span, indent), width in zip(
-            cells, row[3], layout, widths[1:]
+        out = [row.name.ljust(widths[0])]
+        for cell, source, (size, mark_width, span, indent), width in zip(
+            cells, row.cells, layout, widths[1:]
         ):
             if isinstance(cell, str):
                 pad = " " * (width - indent - len(cell))
@@ -1387,9 +1441,9 @@ def render(rows, headers, credits, use_color, total=""):
                 else:
                     color = GREEN if value == low else RED if value == high else None
                 fields.append(field(text, part, color, use_color))
-            seen.update(mark)
-            pad = " " * (mark_width - len(mark) + width - span)
-            out.append(" ".join(fields) + paint(mark, DIM, use_color) + pad)
+            seen.update(source.mark)
+            pad = " " * (mark_width - len(source.mark) + width - span)
+            out.append(" ".join(fields) + paint(source.mark, DIM, use_color) + pad)
         for text, width, key in zip(texts, widths[n:], trail):
             cell = justify(text, width, key)
             out.append(paint(cell, DIM, use_color) if text.strip() == "-" else cell)
@@ -1397,7 +1451,8 @@ def render(rows, headers, credits, use_color, total=""):
     return seen
 
 
-def main(argv=None):
+def parse_args(argv):
+    """Parse command-line options."""
     ap = argparse.ArgumentParser(description="Compare model prices per provider.")
     ap.add_argument(
         "-f", "--file", default=CONFIG, help=f"config file, default: {CONFIG}"
@@ -1426,9 +1481,11 @@ def main(argv=None):
         default=[],
         type=parse_limit,
         metavar="FIELD=VALUE",
-        help="keep rows that match all name, score or price filters, "
-        "separated by commas; numbers need - for up to or + for at "
-        "least; * is a name wildcard",
+        help="keep rows that match all name, score, price or effort filters, "
+        "separated by commas; use - for up to or + for at least; "
+        "effort also accepts an exact level or unknown; "
+        "effort limits select the highest available level; "
+        "effort ranges also include unknown; * is a name wildcard",
     )
     ap.add_argument(
         "-m",
@@ -1445,23 +1502,6 @@ def main(argv=None):
         metavar="KIND",
         help="score to show: int or intelligence, code or coding; "
         "default: intelligence",
-    )
-    ap.add_argument(
-        "-e",
-        "--effort",
-        choices=EFFORTS,
-        metavar="LEVEL",
-        help=f"effort level of the score: {', '.join(EFFORTS)}. "
-        "default: determined by sel",
-    )
-    ap.add_argument(
-        "-k",
-        "--keep",
-        type=float,
-        default=DEFAULT_KEEP,
-        metavar="PCT",
-        help="keep PCT%% of the top score; "
-        "influences suggested effort level (sel), default: 95",
     )
     ap.add_argument(
         "-v",
@@ -1491,7 +1531,11 @@ def main(argv=None):
         action="store_true",
         help="open the evaluator site for the models",
     )
-    args = ap.parse_args(argv)
+    return ap.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
 
     try:
         cfg = load_config(args.file)
@@ -1521,12 +1565,6 @@ def main(argv=None):
     weights = None if split else parse_ratio(ratio)
     if weights is None and not split:
         print(f"error: bad blend {ratio!r}, expected 7:2:1, 3:1 or 0", file=sys.stderr)
-        return 2
-    if not 0 < args.keep <= 100:
-        print(
-            f"error: bad keep {args.keep:g}, expected above 0, up to 100",
-            file=sys.stderr,
-        )
         return 2
     kind = SCORE_KINDS[args.score]
     # Scores of evaluators are not comparable, so only one is used.
@@ -1561,7 +1599,7 @@ def main(argv=None):
         for p in providers
     }
     scores, shares, dates, ids = (
-        evaluations(evaluator, args.timeout, max_age, args.keep, args.effort, kind)
+        evaluations(evaluator, args.timeout, max_age, kind, args.limit)
         if evaluator
         else ({}, {}, {}, {})
     )
@@ -1610,7 +1648,7 @@ def main(argv=None):
     rows = sort_rows(rows, args.order)
     if args.web:
         by_name = {str(m.get("name", "")): m for m in models}
-        shown = [by_name[row[0]] for row in rows]
+        shown = [by_name[row.name] for row in rows]
         url = evaluator and web_url(evaluator, shown, ids, rater)
         if not url:
             warn(f"{rater or 'no evaluator'}: no web page to open")
@@ -1618,7 +1656,7 @@ def main(argv=None):
             print(url)
         return 0
     use_color = not args.no_color and sys.stdout.isatty()
-    trail = ["score", "sel", "rel"] if scores else []
+    trail = ["score", "effort", "date"] if scores else []
     trail += ["cms"] if args.verbose else []
 
     headers = ["model/provider"] + [name for name, _, _ in results] + trail
@@ -1627,8 +1665,6 @@ def main(argv=None):
     known = [v for v in known if v is not None]
     total = fmt_balance(sum(known)) if known else ""
     seen = render(rows, headers, credits, use_color, total)
-    picked = any(row[1][1] for row in rows)
-    only = any(str(row[1][1]).endswith(ONLY) for row in rows)
     print(
         f"{paint('green', GREEN, use_color)} = lowest, "
         f"{paint('red', RED, use_color)} = highest, "
@@ -1637,13 +1673,15 @@ def main(argv=None):
     if args.verbose:
         if weights:
             mix = "cache, input, output" if len(weights) == 3 else "input, output"
-            shape = f"blended {ratio} {mix}"
+            price_format = f"blended {ratio} {mix}"
         elif any(
-            c[1] and len(c[1]) > 2 and c[1][2] is not None for *_, r in rows for c in r
+            len(cell.values) > 2 and cell.values[2] is not None
+            for row in rows
+            for cell in row.cells
         ):
-            shape = "in, out, cached"
+            price_format = "in, out, cached"
         else:
-            shape = "in, out"
+            price_format = "in, out"
         print()
         if MEASURED in seen:
             print(
@@ -1654,24 +1692,12 @@ def main(argv=None):
             if shares:
                 how = f"estimated from {rater}, else the input price"
             print(f"{GUESSED} means no cache price is listed: {how}")
-        if only:
-            print(f"{ONLY} means {rater} tested only this effort level")
-        print(f"- prices per 1M tokens in {base} ({shape})")
-        if picked:
-            print(
-                f"- sel is a suggested effort level that gives "
-                f"{args.keep:g}% of the top score"
-            )
+        print(f"- prices per 1M tokens in {base} ({price_format})")
+        if scores:
+            print("- effort is the effort level of the score, or - if unknown")
         if dates:
-            print("- rel is the month the model was released")
-        if scores and picked and args.effort:
-            print(
-                f"- score is the {kind} score at effort level {args.effort}, "
-                "or the closest level below it"
-            )
-        elif scores and picked:
-            print(f"- score is the {kind} score at the sel effort level")
-        elif scores:
+            print("- date is the month the model was released")
+        if scores:
             print(f"- score is the {kind} score of {rater}")
         print("- cms is the model id of the cheapest price, the first on a tie")
     for currency in sorted(missing):
