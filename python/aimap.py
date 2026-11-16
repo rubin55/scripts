@@ -99,6 +99,10 @@ For example, "effort=high-" keeps high and lower effort levels, and
 keep unknown effort. "effort=high" keeps only high, and "effort=unknown"
 keeps only unknown effort. Effort filters select the highest available
 effort within the limits for each model.
+A provider filter such as "provider=opencode" keeps only the provider
+columns whose name matches. It uses shell wildcards and ignores case.
+Several provider filters keep each provider that matches one of them.
+The other filters then see only those providers.
 
 Config format:
 
@@ -1126,11 +1130,13 @@ def parse_limit(text):
     for item in text.split(","):
         key, sep, value = item.partition("=")
         key, value = key.strip().lower(), value.strip()
-        if not sep or not value or key not in ("name", "score", "price", "effort"):
+        fields = ("name", "provider", "score", "price", "effort")
+        if not sep or not value or key not in fields:
             raise argparse.ArgumentTypeError(
-                "expected FIELD=VALUE with FIELD set to name, score, price or effort"
+                "expected FIELD=VALUE with FIELD set to name, provider, score, "
+                "price or effort"
             )
-        if key == "name":
+        if key in ("name", "provider"):
             rules.append((key, fnmatch.fnmatchcase, value.casefold()))
             continue
         if key == "effort":
@@ -1293,7 +1299,7 @@ def cheapest_slug(row):
 
 
 def matches_limits(row, limits):
-    """True when a row matches every limit rule."""
+    """True when a row matches every limit rule except provider."""
     values = {
         "name": row.name.casefold(),
         "score": row.rating[0],
@@ -1305,6 +1311,7 @@ def matches_limits(row, limits):
         if values[key] is not None or test is operator.eq
         else key == "effort"
         for key, test, limit in limits
+        if key != "provider"
     )
 
 
@@ -1482,7 +1489,8 @@ def parse_args(argv):
         type=parse_limit,
         metavar="FIELD=VALUE",
         help="keep rows that match all name, score, price or effort filters, "
-        "separated by commas; use - for up to or + for at least; "
+        "separated by commas; provider keeps only matching columns; "
+        "use - for up to or + for at least; "
         "effort also accepts an exact level or unknown; "
         "effort limits select the highest available level; "
         "effort ranges also include unknown; * is a name wildcard",
@@ -1552,6 +1560,23 @@ def main(argv=None):
     if not providers or not models:
         print("error: config needs model_providers and models", file=sys.stderr)
         return 2
+    wanted = [value for key, _, value in args.limit if key == "provider"]
+    if wanted:
+        names = ", ".join(str(p.get("name")) for p in providers)
+        providers = [
+            p
+            for p in providers
+            if any(
+                fnmatch.fnmatchcase(str(p.get("name", "")).casefold(), w)
+                for w in wanted
+            )
+        ]
+        if not providers:
+            print(
+                f"error: no provider matches --limit, config has: {names}",
+                file=sys.stderr,
+            )
+            return 2
 
     base = args.currency.upper()
     if len(base) != 3 or not base.isalpha():
