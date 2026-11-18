@@ -1,0 +1,23 @@
+; .openshift-login.ini
+;
+; [firefox]
+; container: Firefox container with the SSO session (required, empty
+;            for no container)
+; profile:   Firefox profile directory (optional, default: the default
+;            profile in profiles.ini)
+;
+; [openshift]
+; idp:       identity provider on the OpenShift login page (optional,
+;            required when the login page shows more than one)
+; contexts:  kubectl contexts to update, separated by spaces (optional,
+;            command line arguments replace them)
+;
+; The script gets the users and the API servers from kubeconfig, and
+; the OAuth server from each API server.
+
+[firefox]
+container = Work
+
+[openshift]
+idp = My-SSO
+contexts = cluster-a cluster-b

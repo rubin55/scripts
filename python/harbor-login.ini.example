@@ -1,0 +1,35 @@
+; .harbor-login.ini
+;
+; [harbor]
+; mode:      personal or robot (required, -m replaces it)
+;            personal: log in with your own account and its CLI secret,
+;            which Harbor shows after a login through its OIDC provider
+;            robot: log in with the robot account in a Kubernetes Secret
+;
+; [registries]
+; <name> = <host>, one line for each registry (required)
+;            name: harbor-cli context name
+;            host: registry host, also used for docker login
+;
+; [firefox]  (mode personal)
+; container: Firefox container with the SSO session (required, empty
+;            for no container)
+; profile:   Firefox profile directory (optional, default: the default
+;            profile in profiles.ini)
+;
+; [robot]    (mode robot)
+; context:   kubectl context of the namespace with the Secret (required)
+; secret:    Secret of type kubernetes.io/dockerconfigjson (required)
+
+[harbor]
+mode = personal
+
+[registries]
+main = harbor.example.org
+
+[firefox]
+container = Work
+
+[robot]
+context = my-cluster
+secret = registry-pull-secret
